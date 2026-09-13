@@ -603,7 +603,8 @@ static void kline_init_ioctls(void)
              "Connect ISO9141");
 
     /* Five-baud: the address goes out in decimal on the command line, with
-     * no payload; the two keybytes come back in the caller's SBYTE_ARRAY. */
+     * no payload; the two keybytes come back as `arw3 85 8 <seq>` and land
+     * in the caller's SBYTE_ARRAY with the number stripped. */
     mock_clear_tx();
     in.NumOfBytes = 1; in.BytePtr = &addr;
     out.NumOfBytes = sizeof keys; out.BytePtr = keys;

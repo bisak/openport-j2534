@@ -301,6 +301,32 @@ static void stash_reply(op_device *d, const op_reply *r)
         memcpy(d->reply_data, r->data, n);
         d->reply.data     = d->reply_data;
         d->reply.data_len = n;
+    } else if (r->kind == OP_REPLY_INIT && r->init_ntok > 0) {
+        /* `arw<ch> <b> <b> ... [<seq>]`: the five-baud key bytes as decimal
+         * tokens. Every token is a byte except the echoed number, which is
+         * last and is not data. */
+        unsigned ntok = r->init_ntok, k;
+        size_t n = 0;
+        if (d->seq_pending != 0) {
+            if (r->init_tok[ntok - 1] != d->seq_pending) {
+                op_logf("discarding init reply for command %lu while command %lu waits",
+                        (unsigned long)r->init_tok[ntok - 1],
+                        (unsigned long)d->seq_pending);
+                return;
+            }
+            ntok--;
+        }
+        for (k = 0; k < ntok; k++) {
+            if (r->init_tok[k] > 0xFF) {
+                op_logf("init reply token %lu is not a byte; dropping the result",
+                        (unsigned long)r->init_tok[k]);
+                n = 0;
+                break;
+            }
+            d->reply_data[n++] = (uint8_t)r->init_tok[k];
+        }
+        d->reply.data     = n ? d->reply_data : NULL;
+        d->reply.data_len = n;
     } else {
         d->reply.data     = NULL;
         d->reply.data_len = 0;
@@ -392,7 +418,7 @@ static void *reader_main(void *arg)
  * seven-deep backlog after an interrupted one, or noise in the stream can
  * therefore no longer shift every subsequent answer by one: it is dropped as
  * belonging to nothing. Sync is then just a numbered reset and a numbered
- * attention, each of which must come back with its number.
+ * close-all (`ata`), each of which must come back with its number.
  *
  * Runs with the reader thread already started; it is an ordinary command
  * exchange.
@@ -410,7 +436,7 @@ static op_status sync_device(op_device *d)
             op_logf("sync: reset unanswered on attempt %d", attempt + 1);
     }
     if (st == OP_OK) {
-        size_t n = op_cmd_attention(line, sizeof line);
+        size_t n = op_cmd_close_all(line, sizeof line);
         st = op_device_cmd(d, line, n, NULL, 0, 1000, NULL);
     }
     if (st == OP_OK) {

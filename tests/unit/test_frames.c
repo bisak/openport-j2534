@@ -184,6 +184,28 @@ static void init_reply(void)
     CHECK_EQ(n, 5, "aro length");
 
     {
+        /* Five-baud answers `arw<ch> <b> <b>` with the key bytes in decimal
+         * on the line (Aiden-korbs/openport2-winarm-j2534, HDS on a 2005
+         * Honda CR-V; PROTOCOL.md section 3). Nothing follows the line. */
+        const uint8_t arw[] = { 'a','r','w','3',' ','8',' ','8','\r','\n','a','r','o','\r','\n' };
+        n = op_parse(arw, sizeof arw, &r);
+        CHECK_EQ(n, 10, "arw consumed to its CRLF and no further");
+        CHECK_EQ(r.kind, OP_REPLY_INIT, "arw is an init reply");
+        CHECK_EQ(r.channel, 3, "arw channel");
+        CHECK_EQ(r.init_ntok, 2, "arw carries its tokens inline");
+        CHECK(r.init_tok[0] == 8 && r.init_tok[1] == 8, "arw key bytes");
+        CHECK(r.data == NULL && r.data_len == 0, "arw has no raw bytes after the line");
+        n = op_parse(arw + 10, sizeof arw - 10, &r);
+        CHECK_EQ(r.kind, OP_REPLY_OK, "the aro after arw is intact");
+    }
+    {
+        const uint8_t bare[] = { 'a','r','w','3','\r','\n' };
+        n = op_parse(bare, sizeof bare, &r);
+        CHECK_EQ(n, 6, "arw with no bytes consumed");
+        CHECK_EQ(r.kind, OP_REPLY_INIT, "arw with no bytes is still an init reply");
+        CHECK_EQ(r.init_ntok, 0, "arw with no bytes has no tokens");
+    }
+    {
         const uint8_t none[] = { 'a','r','y','4',' ','0','\r','\n' };
         n = op_parse(none, sizeof none, &r);
         CHECK_EQ(n, 8, "zero-length init reply consumed");

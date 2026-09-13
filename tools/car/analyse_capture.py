@@ -84,11 +84,12 @@ def q_kline(sections):
         for i in inits:
             print(f"    {i['variant']:<7} ch={i['ch']} reply={i['reply']:<4} "
                   f"{i['took_ms']:>5} ms  bytes={i['bytes'] or '-'}")
-        answered = [i for i in inits if i["reply"] == "ary" and i["bytes"]]
+        answered = [i for i in inits if i["reply"] in ("ary", "arw") and i["bytes"]]
         if answered:
-            print("  an `ary` reply carrying bytes is the device's init response: the")
-            print("  five-baud keybytes or the StartCommunication answer. That settles the")
-            print("  aty/ary command form (PROTOCOL.md section 4) as [V].")
+            print("  an `ary`/`arw` reply carrying bytes is the device's init response: the")
+            print("  StartCommunication answer (`ary` + raw bytes) or the five-baud keybytes")
+            print("  (`arw`, decimal on the line). That settles the reply shape (PROTOCOL.md")
+            print("  section 3) as [V].")
     # The VW flash-status record (1A 9C -> 5A 9C ...) carries the OBD
     # programming counters. Its layout is not documented here; the operator
     # knows the true values (attempts > successes), so print every reading of

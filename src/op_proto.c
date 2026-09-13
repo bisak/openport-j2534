@@ -190,6 +190,26 @@ static void parse_ascii(const char *body, size_t n, op_reply *out)
         return;
     }
 
+    case 'w': {                                 /* arw<ch> <b> <b> ... [<seq>] */
+        uint32_t ch = 0, v = 0;
+        size_t got;
+        got = parse_u32(body + i, n - i, &ch);
+        if (got == 0) return;
+        i += got;
+        out->init_ntok = 0;
+        for (;;) {
+            i += skip_spaces(body + i, n - i);
+            got = parse_u32(body + i, n - i, &v);
+            if (got == 0) break;
+            i += got;
+            if (out->init_ntok < sizeof out->init_tok / sizeof out->init_tok[0])
+                out->init_tok[out->init_ntok++] = v;
+        }
+        out->kind = OP_REPLY_INIT;
+        out->channel = ch;
+        return;
+    }
+
     default:
         return;                                 /* leave as OP_REPLY_JUNK */
     }
@@ -269,10 +289,12 @@ size_t op_parse(const uint8_t *buf, size_t len, op_reply *out)
         for (i = 2; i + 1 < len; i++) {
             if (buf[i] == '\r' && buf[i + 1] == '\n') {
                 parse_ascii((const char *)buf + 2, i - 2, out);
-                if (out->kind == OP_REPLY_INIT) {
-                    /* The init reply announces how many raw response bytes
-                     * follow the line. They are part of this reply, not the
-                     * start of the next one; wait until all of them are in. */
+                if (out->kind == OP_REPLY_INIT && out->init_ntok == 0
+                    && buf[2] == 'y') {
+                    /* `ary` announces how many raw response bytes follow the
+                     * line. They are part of this reply, not the start of the
+                     * next one; wait until all of them are in. `arw` carries
+                     * its bytes on the line and needs nothing further. */
                     size_t want = (size_t)out->a;
                     if (len < i + 2 + want) {
                         memset(out, 0, sizeof *out);
@@ -300,7 +322,7 @@ size_t op_resync_offset(const uint8_t *buf, size_t len)
         if (buf[i] == 'a' && buf[i + 1] == 'r') {
             uint8_t c = buf[i + 2];
             if (is_digit(c) || c == 'o' || c == 'e' || c == 'i' ||
-                c == 'r' || c == 'f' || c == 'g' || c == 'y' || c == 'm')
+                c == 'r' || c == 'f' || c == 'g' || c == 'y' || c == 'w' || c == 'm')
                 return i;
         }
     }
@@ -346,7 +368,7 @@ size_t op_cmd_number(char *line, size_t out_sz, size_t len, uint32_t seq)
     return len + (size_t)n;
 }
 
-size_t op_cmd_attention(char *out, size_t out_sz) { return emit(out, out_sz, "ata\r\n"); }
+size_t op_cmd_close_all(char *out, size_t out_sz) { return emit(out, out_sz, "ata\r\n"); }
 size_t op_cmd_reset(char *out, size_t out_sz)     { return emit(out, out_sz, "atz\r\n"); }
 size_t op_cmd_version(char *out, size_t out_sz)   { return emit(out, out_sz, "ati\r\n"); }
 

@@ -9,7 +9,7 @@ static void encoders(void)
 {
     char b[OP_CMD_MAX];
 
-    CHECK_EQ(op_cmd_attention(b, sizeof b), 5, "ata length");
+    CHECK_EQ(op_cmd_close_all(b, sizeof b), 5, "ata length");
     CHECK_STR(b, "ata\r\n", "ata");
 
     op_cmd_reset(b, sizeof b);   CHECK_STR(b, "atz\r\n", "atz");

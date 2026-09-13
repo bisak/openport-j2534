@@ -457,8 +457,10 @@ def q1_received_frames(p, tx, rx):
 # Measured on the Audi 2026-09-13: atw blocks ~2.45 s (one byte at 5 baud),
 # aty returns in ~108 ms (a fast-init wake pulse). The earlier `aty<ch> 1 1`
 # five-baud form never performed a five-baud init at all.
-# The reply is `ary<ch> <len>\r\n` followed by <len> raw bytes — the ECU's
-# keybytes or StartCommunication response — or `are <code>`.
+# The reply to `aty` is `ary<ch> <len>\r\n` followed by <len> raw bytes — the
+# StartCommunication response. The reply to `atw` is `arw<ch> <b> <b>\r\n`,
+# the keybytes in decimal on the line (third-party, HDS-verified on a Honda;
+# PROTOCOL.md section 3). Either can be `are <code>` instead.
 #
 # Every variant is a standard tester wake-up. Two use the EOBD functional
 # address 0x33 (what any scan tool does); two use the VAG engine address 0x01
@@ -485,7 +487,17 @@ def kline_header(proto, physical, n):
 
 
 def parse_init_reply(r):
-    """Return ('ary', bytes) / ('aro', b'') / ('are', code) / ('none', b'')."""
+    """Return ('ary', bytes) / ('arw', bytes) / ('aro', b'') / ('are', code) / ('none', b'')."""
+    i = r.find(b"arw")
+    if i >= 0:
+        j = r.find(b"\r\n", i)
+        if j > 0:
+            toks = r[i + 4:j].split()
+            try:
+                vals = [int(t) for t in toks]
+            except ValueError:
+                vals = []
+            return "arw", bytes(v for v in vals if 0 <= v <= 0xFF)
     i = r.find(b"ary")
     if i >= 0:
         j = r.find(b"\r\n", i)
@@ -521,7 +533,7 @@ def kline_init(p, variant):
     emit(f"      INIT variant={name} ch={proto} reply={kind} took={int((time.time()-t0)*1000)}ms "
          f"bytes={body.hex(' ') if isinstance(body, bytes) else body!r}")
     show_stream(r)
-    return proto, kind in ("ary", "aro")
+    return proto, kind in ("ary", "arw", "aro")
 
 
 def kline_requests(p, proto, physical, requests):

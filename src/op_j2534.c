@@ -1123,7 +1123,9 @@ static long ioctl_init(op_device *d, J_U32 ChannelID, int five_baud,
     /*
      * An initialisation has only happened if the ECU answered it: five-baud
      * returns key bytes, fast init the StartCommunication response. The device
-     * signals that with `ary<ch> <n>` and the bytes. A bare `aro` means the
+     * signals that with `arw<ch> <b> <b>` (five-baud, the key bytes in
+     * decimal on the line) or `ary<ch> <n>` and n raw bytes (fast init) —
+     * PROTOCOL.md section 3. A bare `aro` means the
      * command was accepted and nothing came back — reporting success for that
      * would tell a caller a dead K-line had woken up, which is precisely the
      * class of lie this driver exists to avoid, and what it did until now.

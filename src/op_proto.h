@@ -53,7 +53,7 @@ typedef enum {
     OP_REPLY_FILTER,         /* arf<ch> <filter_id> <detail>              */
     OP_REPLY_CONFIG,         /* arg<ch> <param> <value> <detail>          */
     OP_REPLY_FRAME,          /* binary message frame                      */
-    OP_REPLY_INIT,           /* ary<ch> <len> + <len> raw bytes (K-line init) */
+    OP_REPLY_INIT,           /* ary<ch> <len> + <len> raw bytes, or arw<ch> <b>... (K-line init) */
     OP_REPLY_PERIODIC,       /* arm<ch> <msg_id> <n> (firmware periodic)      */
     OP_REPLY_JUNK            /* a complete line we do not recognise       */
 } op_reply_kind;
@@ -76,6 +76,13 @@ typedef struct {
      * which is which. */
     unsigned      ntail;
     uint32_t      tail[3];
+
+    /* OP_REPLY_INIT from `arw<ch> <b> <b> ...`: the ECU's bytes arrive as
+     * decimal tokens on the line itself, not as raw bytes after it. When the
+     * command was numbered the last token is the echoed sequence number; the
+     * device layer, which knows, strips it. `data` is NULL for this shape. */
+    unsigned      init_ntok;
+    uint32_t      init_tok[8];
 
     /* OP_REPLY_INFO: points into the caller's buffer, not NUL-terminated */
     const char   *text;
@@ -114,7 +121,7 @@ size_t op_resync_offset(const uint8_t *buf, size_t len);
  * its length, or 0 if it would not fit. Binary payloads are the caller's to
  * append; the encoder reports how many bytes the device will expect.
  */
-size_t op_cmd_attention(char *out, size_t out_sz);                 /* ata */
+size_t op_cmd_close_all(char *out, size_t out_sz);                 /* ata: closes every channel */
 size_t op_cmd_reset(char *out, size_t out_sz);                     /* atz */
 size_t op_cmd_version(char *out, size_t out_sz);                   /* ati */
 size_t op_cmd_open(char *out, size_t out_sz,

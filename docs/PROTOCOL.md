@@ -106,7 +106,8 @@ An unrecognised command produces **no reply at all** — silence, not an error.
 | `arr <pin> <millivolts>` | pin voltage |
 | `arf<ch> <filter_id> <n>` | filter installed |
 | `arg<ch> <param> <value> <n>` | configuration value |
-| `ary<ch> <n>` + `n` raw bytes | K-line init result: the five-baud keybytes or the StartCommunication response follow the line as raw bytes **[P]** (§4) — the failure reply `are 7` is measured, a success has not yet been captured |
+| `arw<ch> <b> <b> …` | five-baud init result: the ECU's keybytes **in decimal on the line**, then the echoed number **[P]** (§4) — third-party, measured with HDS on a 2005 Honda (`Aiden-korbs/openport2-winarm-j2534`, `j2534.c` and `extras/macos_openport_iso9141_mode09.c` both check for `arw`); on this bench with no ECU the answer is `are 7`. Until 2026-09-13 this driver expected `ary` here and would have reported a real five-baud success as `ERR_INIT_FAILED` |
+| `ary<ch> <n>` + `n` raw bytes | fast init result: the StartCommunication response follows the line as raw bytes **[P]** (§4), the `dschultzca` lineage's reading — the failure reply `are 7` is measured, a success has not yet been captured |
 
 The trailing `<n>` on `arf`/`arg` was 0 in every single-parameter observation
 and echoed a following parameter id in a multi-parameter `atg` query. **[P]**
@@ -129,10 +130,10 @@ means the verb does not exist.
 
 | Command | Args | Purpose | Conf. |
 |---|---|---|---|
-| `ata` | — | attention; replies `aro` | **[V]** |
+| `ata` | — | **close every open channel**; replies `aro`. Measured 2026-09-13: a filter installed on channel 6 answers `are 2` after `ata`, and `ato6` opens again. It differs from `atz` only in that it is answered by number (§3). Earlier revisions of this document called it "attention" | **[V]** |
 | `ati` | — | version: `ari main code version : 1.17.4877` | **[V]** |
 | `atz` | — | reset; replies `aro` | **[V]** |
-| `ato<proto>` | `<flags> <baud> 0` | open a channel. The vendor DLL puts a varying value in the last field when opening ISO9141 (3 on the bench, 5 on a car, each time the handle of the ISO14230 channel it had just closed), which is its own bookkeeping; the firmware accepts 0 | **[V]** |
+| `ato<proto>` | `<flags> <baud> 0` | open a channel. The vendor DLL puts a varying value in the last field when opening ISO9141 (3 on the bench, 5 on a car, each time the handle of the ISO14230 channel it had just closed), which is its own bookkeeping; the firmware accepts 0. **The field is ignored** (measured 2026-09-13): channels 5, 6 and 3 opened with 0 in it simultaneously, `ato5 … 7` was accepted, and a second `ato5` gets `are 20` whatever value it carries — so it is not a channel slot, as one third-party driver reads it | **[V]** |
 | `atc<ch>` | — | close a channel | **[V]** |
 | `att<ch>` | `<len> <txflags> <timeout_us>` + payload | transmit; `<timeout_us>` is the firmware's budget for getting the message on the bus, the DLL sends the caller's `WriteMsgs` Timeout in microseconds (1 000 000 for a Timeout of 0); without it the firmware gives up after ~1 s | **[V]** |
 | `atf<ch>` | `<type> <txflags> <len>` + payload | install filter | **[V]** |
@@ -142,12 +143,12 @@ means the verb does not exist.
 | `atr` | ` <pin>` | read a pin voltage | **[V]** |
 | `atv` | ` <pin> <millivolts>` | **programming voltage** | **[V]** |
 | `atl<ch>` | — | answers `aro`; what it clears is unmeasured. The vendor DLL never sends it (`CLEAR_RX_BUFFER` is host-side there) and this driver no longer does | **[P]** |
-| `atp<ch>` | `<len> <interval>` + payload | rejected for every interval (§10); the DLL never sends it | **[V]** rejected |
+| `atp` | ` <pin> <value>` | a **pin verb**, sharing `atv`'s argument shape (the vendor DLL's format-string table has one template, `at%c %d %d %u`, for both `p` and `v`). Takes ~0.5 s to answer; every `(pin, value)` tried on 2026-09-13 — pins 0, 1, 6, 12, 15; values 1, 5000, 20000, `SHORT_TO_GROUND`, `VOLTAGE_OFF` — answered `are 10`, value 0 `are 5`. Function unknown; the DLL is not seen sending it. Earlier revisions read it as "start periodic message" and swept an interval: that shape was simply wrong | **[V]** rejected |
 | `atn<ch>` | `<msg_id>` | stop periodic message | **[P]** |
 | `atm<ch>` | `<interval_us> 0 <txflags> <len> <seq>` + payload | **start periodic message**, what the vendor DLL sends; replies `arm<ch> <id> <seq>`, ids from 0; `atn<ch> <id>` stops it, `are 13` for an unknown id | **[V]** |
 | `aty<ch>` | `<len> 0` + request bytes | K-line **fast** init | **[V]** — measured: returns in ~108 ms, a 25/25 ms wake pulse |
 | `atw<ch>` | `<address>` (decimal, no payload) | K-line **five-baud** init; `atw3 51` for 0x33, as the vendor DLL sends it. The earlier reading `<len>` + address byte was wrong: the firmware took the 1 as the address and the byte as the start of the next command, which is why every five-baud init this project sent went to ECU 0x01 | **[V]** — blocks ~2450 ms, one byte clocked out at 5 baud |
-| `atw`, `atx` | ? | exist, consume a payload, purpose unknown | **[U]** |
+| `atx` | ? | exists, consumes a payload, purpose unknown | **[U]** |
 
 `atb atd ate ath atj atq atu` do not exist (silence).
 
@@ -216,6 +217,28 @@ ato6 0 500000 0   -> aro          opens again
 Closing a channel that was never open still replies `aro`; the device does not
 validate the digit on `atc`.
 
+**Protocols sharing a pin group are mutually exclusive, and the refusal is
+`are 3`, not `are 20`** (measured 2026-09-13):
+
+```
+ato3 0 10400 0    -> aro          ISO9141 open
+ato4 0 10400 0    -> are 3        ISO14230 refused while ISO9141 holds the K line
+atc3 / ato4       -> aro          and the other way round: ato3 is then are 3
+ato5, ato6, ato7  -> aro aro aro
+ato8 0 7812 0     -> are 3        SCI A trans refused while SCI A engine is open
+ato9 0 7812 0     -> aro          four channels open at once: 5, 6, 7, 9
+```
+
+So there is **no three-channel cap** — a third-party driver reports one, but
+its fourth open was a second `ato5`, which is `are 20` for being a duplicate,
+not for being the fourth. The pairs are ISO9141/ISO14230 (K line) and SCI A
+engine/trans.
+
+**Baud rate is not validated on open.** `ato5 0 123456 0`, `ato3 0 4800 0`,
+`ato4 0 9600 0` and `ato6 0 0 0` all answer `aro`. No `ERR_INVALID_BAUDRATE`
+(25) was ever produced, and ISO14230 is not "10400 only" as one third-party
+document states; what a wrong rate does on the bus is unmeasured.
+
 Protocols accepted, by sweeping `ato0..ato12`:
 
 | ID | Protocol | Accepted |
@@ -259,7 +282,7 @@ function. Confirmed by provoking each one:
 |---|---|---|
 | `atg6 0` (unsupported parameter) | `are 1` | `ERR_NOT_SUPPORTED` |
 | `ato1 …` (J1850) | `are 3` | `ERR_INVALID_PROTOCOL_ID` |
-| `atp6 6 100` (bad interval) | `are 5 100` | `ERR_INVALID_IOCTL_VALUE` |
+| `atp 12 0` (pin verb, zero value) | `are 5` | `ERR_INVALID_IOCTL_VALUE` |
 | malformed command | `are 7` | `ERR_FAILED` |
 | transmit with no bus | `are 9` | `ERR_TIMEOUT` |
 | `atf6 3 0 12` (wrong payload length) | `are 10` | `ERR_INVALID_MSG` |
@@ -432,7 +455,11 @@ now defaults to `id_every_chunk`; this driver reassembles correctly under
 either. No capture of a receive longer than one wire frame exists yet; a
 `$23` read of 0xFF bytes on an ECU that answers it would make this **[V]**.
 
-**`0x10` is a value no prior driver handled, and it is not rare.** **[V]** On a
+**`0x10` is not rare, and misreading it produces phantom messages.** **[V]**
+(An earlier revision said no prior driver handled it. That was wrong: the
+`dschultzca`/`NikolaKozina` C driver has a `TX_DONE` case for `0x10` and
+reports it as `RxStatus` 8, `TX_INDICATION`; what it lacks is the `0x12`
+variant below.) On a
 vehicle (2026-09-13) *every* successful transmit produced one: a frame carrying
 the 4-byte CAN id and no data, immediately after the `aro`. It is the device's
 transmit indication, and a driver that mistakes it for received data will report
@@ -627,12 +654,13 @@ remains as it was.
 | Question | Answer |
 |---|---|
 | Pin 16 with a vehicle attached | 12 156–12 199 mV against a ~12.2 V battery: `READ_VBATT` is millivolts (§8 drops its **[U]**) |
-| Which pins answer `atr` | 12, 16 and 17 only; every other pin 0–20 gives `are 19`, the same as on the bench |
+| Which pins answer `atr` | 8, 12, 16 and 17 (§8); every other pin 0–20 gives `are 19`, the same as on the bench. An earlier revision of this row omitted pin 8; re-measured 2026-09-13 |
 | The `0x10` status | the normal transmit indication on every transmit (§7) |
-| `atp` interval encoding | **every** value 0–65535 was rejected with `are 5 <n>`. `atp` was the wrong verb: the vendor DLL uses `atm` (§4), which works |
+| `atp` interval encoding | there is none: `atp` is a pin verb with `atv`'s shape (§4), and every interval this project swept was being parsed as a value. The vendor DLL's periodic command is `atm` (§4), which works |
 | `atm`, `atw`, `atx`, `aty` | `atw` is five-baud init and `aty` is fast init (§4). `atx<ch> <n>` echoes its argument back in the error (`are 7 1`); `atm<ch>` fails immediately. Both remain unidentified |
 | The DLL's five-argument forms | accepted. `ato6 0 500000 0 1` answered **`aro 1`** — the device echoes the trailing sequence number back in its acknowledgement, which is what that argument is for. The five-argument `att` was accepted too |
 | Two-digit protocol numbers | `ato10`, `ato11`, `ato1`, `ato0` all give `are 3` |
+| Letter channel bytes (`atoC`, `atoD`, `atoS` for the J2534-2 L-line and AUX protocols that `emdzej/j2534` reads out of the DLL) | `are 7` on firmware 1.17.4877 for all three, and `atcC` too. Not this firmware's dialect, or not at this firmware level |
 
 **Still open, and why this car could not close them.**
 
@@ -762,6 +790,27 @@ misleading — it looks like the vehicle supports some services and not others.
 | Tactrix EcuFlash changelog (openecu.org `EcuFlash`, tactrix.com "EcuFlash 1.44") | firmware history: 1.41 "fix ISO K and L lines to do proper J2534 LOOPBACK functionality — no echoes unless LOOPBACK=1" and "fix bug where ISO15765 TX_FLAG_DONE messages had incorrect timestamp"; 1.42 "fix bug which can cause CAN receive buffer overruns during large ISO15765 transfers"; 1.44 "return CAN_29BIT_ID flag on appropriate read results" | vendor |
 | github.com/sw7ft/BerryCore `ports/openport/src/openport.c` | a CAN logger that accepts only `0x00`/`0x20`/`0x40` frames and reads id+data from them, working on a vehicle | third party |
 | The prior macOS driver (MQBau fork of `dschultzca`/`NikolaKozina`, `j2534.c`) | the prior driver's per-frame handling, which preserved the shape in the June log; same K-line asymmetry | prior implementation |
+
+## Third-party claims tested on the bench, 2026-09-13
+
+A sweep of GitHub for other OpenPort 2.0 wire-protocol implementations turned
+up several the sources table above does not list. Each claim that differed
+from this document was put to the cable rather than adopted or dismissed.
+
+| Source | Claim | Bench result |
+|---|---|---|
+| `Mackanized/op2j2534` (Windows COM-port DLL, live-bus verified; command templates dumped from the unpacked vendor DLL) | `ato`'s fourth argument is a channel slot 0–2 and a fourth open fails | **refuted** — the field is ignored (§4), and the "fourth open" in their log was a duplicate `ato5` (§5) |
+| same | three channels maximum | **refuted** — 5, 6, 7 and 9 open together; the real rule is pin-group exclusivity (§5) |
+| same | ISO14230 opens at 10400 only; `are 25` for a bad rate | **refuted** — no baud rate is validated (§5) |
+| same | `atf` args are `<type> <mask_len> <pattern_len>` | not adopted — the vendor DLL sends `atf6 3 64 4` for a flow-control filter (`docs/AB-OFFICIAL.md`), where 64 is `ISO15765_FRAME_PAD`, so the third field is TxFlags; their `4 4` is accepted because 4 is a harmless TxFlags value and 4 is the right length |
+| same | `ata` closes all channels | **confirmed** (§4) |
+| same | `atp` shares `atv`'s template | **confirmed** (§4) |
+| same | readable pins 8, 12, 16, 17 | **confirmed** (§8, §10) |
+| `Aiden-korbs/openport2-winarm-j2534` (`dschultzca` fork; HDS and EvoScan on a 2005 Honda CR-V over ISO9141) | five-baud answers `arw<ch> <b> <b>` in decimal | **not testable without an ECU** (`are 7` here); adopted as **[P]** because a working HDS session depends on those key bytes, and the driver accepts both shapes (§3) |
+| `emdzej/j2534` (TypeScript, from a Ghidra reading of the vendor DLL) | channel bytes `C`, `D`, `S` for ISO9141_L, ISO14230_L and AUX | **refuted on this firmware** — `are 7` (§10) |
+| same | five-baud is `aty<ch> 1 1` + address byte | not adopted — `aty<ch> 1 1` + byte answers `are 7` here exactly like `aty<ch> 1 0`, and the vendor DLL was captured sending `atw3 51` (§4) |
+| `NikolaKozina/j2534`, `Natzirt-BK/subaru-ecu-tools-linux`, `jakka351/j2534` | — | the same `dschultzca` source; the second adds libusb auto-detach for Wine, the third is a Drewtech Mongoose project carrying a stale copy. Nothing new |
+| `kylehulscher/atlas`, `colecrouter/ecu-explorer`, `sw7ft/BerryCore`, `Nedkelly80/tactrix-mac-driver` | — | same command set and frame layout as §2–§7; no claim this document lacked |
 
 ## Reproducing this
 

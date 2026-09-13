@@ -297,13 +297,13 @@ static void openport_responder(const char *line, size_t len,
     } else if (strncmp(buf, "ati", 3) == 0) {
         mock_push_str("ari main code version : 1.17.4877\r\n");
     } else if (strncmp(buf, "atw", 3) == 0) {
-        /* Five-baud init (`atw<ch> <address>`, no payload): answers with the
-         * two keybytes as `ary<ch> <n>` + raw bytes. */
+        /* Five-baud init (`atw<ch> <address>`, no payload): the keybytes come
+         * back in decimal on the line, `arw<ch> <b> <b>`, then the echoed
+         * number (PROTOCOL.md section 3). */
         char hdr[32];
         if (sscanf(buf + 3, "%u %u", &ch, &a) == 2) {
-            snprintf(hdr, sizeof hdr, "ary%u 2\r\n", ch);
-            mock_push_str(hdr);
-            mock_push("\x55\x08", 2);
+            snprintf(hdr, sizeof hdr, "arw%u 85 8", ch);
+            mock_push_reply(hdr);
         }
     } else if (strncmp(buf, "aty", 3) == 0) {
         /* Fast init (`aty<ch> <n> 0` + request): answers with a three-byte

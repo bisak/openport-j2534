@@ -179,8 +179,10 @@ class Wire:
         # unpadded. Modelled here so a tool that forgets the flag fails a test
         # instead of failing at a car.
         self.enforce_frame_pad = True
-        # What a K-line init (`atw`/`aty`) is answered with: "aro", or "ary" for
-        # `ary<ch> <len>\r\n` + the ECU's response bytes.
+        # What a K-line init (`atw`/`aty`) is answered with: "aro"; "ary" for
+        # `ary<ch> <len>\r\n` + the ECU's response bytes; or "arw" for five-baud
+        # answered `arw<ch> <b> <b>\r\n` with the key bytes in decimal on the
+        # line (third-party, HDS-verified on a Honda; PROTOCOL.md section 3).
         self.init_reply = "aro"
 
 
@@ -382,7 +384,10 @@ class OpenPortSim:
         self._seq = self._trailing_seq(verb, rest)
         self._note_extra_args(verb, rest)
 
-        if verb == "a":  return self._ok()
+        # `ata` closes every open channel, exactly like `atz` (measured
+        # 2026-09-13: a filter on a channel opened before `ata` answers
+        # `are 2` after it).
+        if verb == "a":  self.channels.clear(); return self._ok()
         if verb == "z":  self.channels.clear(); return self._ok()
         if verb == "i":  return self._reply(f"ari main code version : {FW_VERSION}\r\n")
 
@@ -440,6 +445,13 @@ class OpenPortSim:
         if ch is None or len(args) < 3:            return self._err(ERR_FAILED)
         if ch not in SUPPORTED_PROTOCOLS:          return self._err(ERR_INVALID_PROTOCOL_ID)
         if ch in self.channels:                    return self._err(ERR_CHANNEL_IN_USE)
+        # Protocols sharing a pin group are mutually exclusive, with
+        # ERR_INVALID_PROTOCOL_ID rather than IN_USE: ISO9141/ISO14230 share
+        # the K line, SCI A engine/trans share pins 7/12 (measured 2026-09-13).
+        # There is no cap on the number of channels: 5, 6, 7 and 9 open together.
+        for a, b in ((3, 4), (7, 8)):
+            if ch in (a, b) and (a in self.channels or b in self.channels):
+                return self._err(ERR_INVALID_PROTOCOL_ID)
         try:
             flags, baud = int(args[0]), int(args[1])
         except ValueError:                         return self._err(ERR_FAILED)
@@ -682,26 +694,25 @@ class OpenPortSim:
             body = resp or b""
             self._reply(f"ary{ch} {len(body)}\r\n".encode() + body)
             return
+        if self.wire.init_reply == "arw" and five_baud:
+            toks = "".join(f" {b}" for b in (resp or b""))
+            self._reply(self._with_seq(f"arw{ch}{toks}"))
+            return
         self._ok()
         if resp is not None:
             threading.Timer(0.01, lambda: self.send_message(ch, resp)).start()
 
     def _cmd_periodic_start(self, rest, payload):
-        """`atp<ch> <len> <interval>` + payload. The reply shape `arp<ch> <id> 0`
-        is MODELLED by analogy with `arf`; the cable answered `are 5` to the one
-        interval this project tried (PROTOCOL.md section 10)."""
-        ch, args = self._split_ch(rest)
-        if ch is None or len(args) < 2: return self._err(ERR_FAILED)
-        c = self.channels.get(ch)
-        if c is None: return self._err(ERR_FAILED)
-        try: declared, interval = int(args[0]), int(args[1])
-        except ValueError: return self._err(ERR_INVALID_MSG)
-        if declared != len(payload): return self._err(ERR_INVALID_MSG)
-        pid = c.next_periodic_id
-        c.next_periodic_id += 1
-        c.periodic[pid] = (interval, bytes(payload))
-        self._log(f"  !! atp accepted: id={pid} interval={interval} (reply MODELLED)")
-        self._reply(f"arp{ch} {pid} 0\r\n")
+        """`atp <pin> <value>`: a pin verb sharing `atv`'s argument shape, not
+        a periodic message. Measured 2026-09-13 with the cable: every
+        (pin, value) tried answers `are 10`, except value 0 which answers
+        `are 5`; the reply takes ~0.5 s. Its function is unknown and the
+        vendor DLL is not seen sending it."""
+        args = rest.strip().split()
+        if len(args) < 2: return self._err(ERR_FAILED)
+        try: value = int(args[1])
+        except ValueError: return self._err(ERR_FAILED)
+        return self._err(ERR_INVALID_IOCTL_VALUE if value == 0 else ERR_INVALID_MSG)
 
     def _cmd_periodic_vendor(self, rest, payload):
         """`atm<ch> <interval_us> 0 <txflags> <len> <seq>` + payload, the
@@ -852,7 +863,7 @@ def main():
     ap.add_argument("--echo", choices=ECHO_SHAPES, default="mirror_rx")
     ap.add_argument("--tx-done", action="store_true")
     ap.add_argument("--answer-unknown", action="store_true")
-    ap.add_argument("--init-reply", choices=("aro", "ary"), default="aro")
+    ap.add_argument("--init-reply", choices=("aro", "ary", "arw"), default="aro")
     ap.add_argument("--respond", action="append", default=[], metavar="REQHEX=RESPHEX",
                     help="ECU response; repeatable; REQ '*' is the default answer; "
                          "RESP may end in +gen<N>")
