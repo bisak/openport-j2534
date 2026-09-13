@@ -30,11 +30,13 @@ is an ordinary user-space library on libusb.
 
 ```bash
 brew tap bisak/openport-j2534 https://github.com/bisak/openport-j2534
+brew trust bisak/openport-j2534
 brew install openport-j2534
 ```
 
-That builds from the latest release. `brew install --HEAD openport-j2534`
-builds from `main` instead.
+`brew trust` is Homebrew's standard step for any tap outside the Homebrew
+organisation. The install builds the latest release from source in about a
+second; `brew install --HEAD openport-j2534` builds `main` instead.
 
 ### From source (macOS or Linux)
 
