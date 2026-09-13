@@ -1,6 +1,8 @@
 class OpenportJ2534 < Formula
   desc "SAE J2534 PassThru driver for the Tactrix OpenPort 2.0 (macOS, Linux)"
   homepage "https://github.com/bisak/openport-j2534"
+  url "https://github.com/bisak/openport-j2534/archive/refs/tags/v0.1.0.tar.gz"
+  sha256 "a7224d4c7de2e580c27d40902cd58eb444d1f48867e6dc7716dbb94915a66c11"
   license "GPL-3.0-or-later"
   head "https://github.com/bisak/openport-j2534.git", branch: "main"
 

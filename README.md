@@ -23,11 +23,18 @@ GPL-3.0-or-later. Not affiliated with or endorsed by Tactrix.
 
 ## Install
 
+No kernel extensions, no `sudo`, no SIP or recovery-mode changes: the driver
+is an ordinary user-space library on libusb.
+
 ### Homebrew (macOS)
 
 ```bash
-brew install --HEAD https://raw.githubusercontent.com/bisak/openport-j2534/main/Formula/openport-j2534.rb
+brew tap bisak/openport-j2534 https://github.com/bisak/openport-j2534
+brew install openport-j2534
 ```
+
+That builds from the latest release. `brew install --HEAD openport-j2534`
+builds from `main` instead.
 
 ### From source (macOS or Linux)
 
