@@ -1,7 +1,7 @@
 # openport-j2534 — build, test and install.
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-VERSION      := 0.1.0
+VERSION      := 0.1.1
 LIBNAME      := libj2534
 UNAME_S      := $(shell uname -s)
 UNAME_M      := $(shell uname -m)
