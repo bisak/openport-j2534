@@ -1,0 +1,11 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=@LIBDIR@
+includedir=@INCLUDEDIR@
+
+Name: openport-j2534
+Description: SAE J2534-1 PassThru library for the Tactrix OpenPort 2.0
+Version: @VERSION@
+Requires.private: libusb-1.0
+Libs: -L${libdir} -lj2534
+Cflags: -I${includedir}

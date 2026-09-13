@@ -1,0 +1,16 @@
+*.o
+*.dylib
+*.so
+*.dSYM/
+tests/run_tests
+tools/op_probe
+examples/op_smoke
+tests/differential/*.trace
+tests/differential/out/
+tests/differential/diff_runner
+__pycache__/
+examples/op_kline
+examples/op_iso15765
+tools/ab-official/out/
+tools/ab-official/j2534_trace
+tools/ab-official/j2534_trace.exe

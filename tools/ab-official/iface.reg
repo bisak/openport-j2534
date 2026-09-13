@@ -1,0 +1,17 @@
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Enum\USB\VID_0403&PID_CC4D\OP20AB001]
+"ClassGUID"="{FB1CF0C4-B412-451f-9F04-DF7537A5003C}"
+"Class"="VehiclePassThru"
+"DeviceDesc"="Tactrix Openport 2.0 J2534 Vehicle Interface"
+"FriendlyName"="Tactrix Openport 2.0 J2534 Vehicle Interface"
+"HardwareID"=hex(7):55,00,53,00,42,00,5c,00,56,00,49,00,44,00,5f,00,30,00,34,00,30,00,33,00,26,00,50,00,49,00,44,00,5f,00,43,00,43,00,34,00,44,00,00,00,00,00
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\DeviceClasses\{6d1781b7-c987-4f6c-8d4f-1efc098bea67}\##?#USB#VID_0403&PID_CC4D#OP20AB001#{6d1781b7-c987-4f6c-8d4f-1efc098bea67}]
+"DeviceInstance"="USB\\VID_0403&PID_CC4D\\OP20AB001"
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\DeviceClasses\{6d1781b7-c987-4f6c-8d4f-1efc098bea67}\##?#USB#VID_0403&PID_CC4D#OP20AB001#{6d1781b7-c987-4f6c-8d4f-1efc098bea67}\#]
+"SymbolicLink"="\\\\?\\usb#vid_0403&pid_cc4d#OP20AB001#{6d1781b7-c987-4f6c-8d4f-1efc098bea67}"
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\DeviceClasses\{6d1781b7-c987-4f6c-8d4f-1efc098bea67}\##?#USB#VID_0403&PID_CC4D#OP20AB001#{6d1781b7-c987-4f6c-8d4f-1efc098bea67}\#\Control]
+"Linked"=dword:00000001
