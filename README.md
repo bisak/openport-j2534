@@ -29,14 +29,13 @@ is an ordinary user-space library on libusb.
 ### Homebrew (macOS)
 
 ```bash
-brew tap bisak/openport-j2534 https://github.com/bisak/openport-j2534
-brew trust bisak/openport-j2534
-brew install openport-j2534
+brew install bisak/tap/openport-j2534
 ```
 
-`brew trust` is Homebrew's standard step for any tap outside the Homebrew
-organisation. The install builds the latest release from source in about a
-second; `brew install --HEAD openport-j2534` builds `main` instead.
+Homebrew asks you to trust the `bisak/tap` tap the first time (or run
+`brew trust bisak/tap` beforehand). The formula lives in
+[bisak/homebrew-tap](https://github.com/bisak/homebrew-tap) and builds the
+latest release from source in about a second; `--HEAD` builds `main`.
 
 ### From source (macOS or Linux)
 
