@@ -17,7 +17,11 @@ replies are meant to be read, the vendor's own Windows driver was run as a
 black box and its traffic compared with this driver's (tools/ab-official),
 and the header and sample programs that ship in the vendor's public driver
 installer were read for interface constants and observable behaviour. No
-vendor code was copied, and no vendor binary was disassembled or decompiled.
+vendor code was copied. Nothing in this driver is derived from the vendor
+driver's code: an early attempt to decompile the packed DLL as shipped
+produced nothing readable, and its protected image was not unpacked.
+Third-party accounts of the DLL's command form (docs/PROTOCOL.md, sources
+table) were treated as claims to verify on the wire, not as ground truth.
 
 This project is not affiliated with, sponsored by, or endorsed by Tactrix Inc.
 "Tactrix" and "OpenPort" are the marks of their respective owner and are used

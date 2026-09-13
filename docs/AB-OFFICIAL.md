@@ -263,12 +263,3 @@ recording was 21 497 calls: one session, 5 882 transmits
 15 605 reads. Replaying it through the vendor DLL is the strongest statement
 this harness can make about a flash: for the exact requests the tool will
 send, Tactrix's own driver and this one put the same bytes on the wire.
-
-## Dumping the unpacked image for Ghidra
-
-`j2534_trace.exe --dump op20pt32.unpacked.dll` writes the DLL's mapped image
-after a `PassThruOpen`, with the section table rewritten so file offsets equal
-virtual addresses. It is a by-product, kept for the questions the black-box
-runs cannot answer (retry logic, the meaning of the constant fourth `att`
-argument). Load it in Ghidra as a PE at image base `0x7B5C0000`; functions the
-protector virtualised will still be opaque.

@@ -7,7 +7,7 @@
  * under Wine and once against libj2534.dylib, and diff the two traces with
  * ab_diff.py. Nothing here knows which library it is driving.
  *
- *   j2534_trace <library> <trace.jsonl> [scenario ...] [--repeat N] [--dump FILE]
+ *   j2534_trace <library> <trace.jsonl> [scenario ...] [--repeat N] [--cycles N]
  *   j2534_trace <library> <trace.jsonl> --replay <record>
  *
  * --replay executes a call recording made by the driver (OPENPORT_RECORD=file,
@@ -18,8 +18,7 @@
  * whether the libraries did the same things.
  *
  * Scenarios: open iso15765 multiframe timeouts errors periodic raw_can kline bench
- * (default: all but kline and bench, which take tens of seconds). --dump writes the library's mapped image after
- * PassThruOpen, which for a packed DLL is the unpacked code (Win32 only).
+ * (default: all but kline and bench, which take tens of seconds).
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -596,55 +595,6 @@ static void replay(const char *path)
     fclose(f);
 }
 
-/* ---- unpacked-image dump (Win32) --------------------------------------- */
-#ifdef _WIN32
-static void dump_image(const char *path)
-{
-    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)lib;
-    IMAGE_NT_HEADERS *nt;
-    IMAGE_SECTION_HEADER *sh;
-    FILE *f; unsigned i; DWORD hdr;
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) { fprintf(stderr, "dump: no DOS header in memory\n"); return; }
-    nt = (IMAGE_NT_HEADERS *)((char *)lib + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) { fprintf(stderr, "dump: no PE header in memory\n"); return; }
-    if (!(f = fopen(path, "wb"))) { perror(path); return; }
-    /* Write headers, then every section at its virtual offset, and fix the
-     * section table so raw == virtual: Ghidra then loads it at the right VAs. */
-    hdr = nt->OptionalHeader.SizeOfHeaders;
-    {
-        char *copy = malloc(hdr);
-        memcpy(copy, lib, hdr);
-        nt = (IMAGE_NT_HEADERS *)(copy + dos->e_lfanew);
-        sh = IMAGE_FIRST_SECTION(nt);
-        for (i = 0; i < nt->FileHeader.NumberOfSections; i++) {
-            sh[i].PointerToRawData = sh[i].VirtualAddress;
-            sh[i].SizeOfRawData = sh[i].Misc.VirtualSize;
-        }
-        fwrite(copy, 1, hdr, f);
-        free(copy);
-    }
-    nt = (IMAGE_NT_HEADERS *)((char *)lib + dos->e_lfanew);
-    sh = IMAGE_FIRST_SECTION(nt);
-    for (i = 0; i < nt->FileHeader.NumberOfSections; i++) {
-        char *va = (char *)lib + sh[i].VirtualAddress; DWORD left = sh[i].Misc.VirtualSize, off = 0;
-        fseek(f, (long)sh[i].VirtualAddress, SEEK_SET);
-        while (left) {
-            MEMORY_BASIC_INFORMATION mbi; DWORD chunk;
-            if (!VirtualQuery(va + off, &mbi, sizeof mbi)) break;
-            chunk = (DWORD)((char *)mbi.BaseAddress + mbi.RegionSize - (va + off));
-            if (chunk > left) chunk = left;
-            if (mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_NOACCESS) && !(mbi.Protect & PAGE_GUARD))
-                fwrite(va + off, 1, chunk, f);
-            else
-                fseek(f, (long)chunk, SEEK_CUR);
-            off += chunk; left -= chunk;
-        }
-    }
-    fclose(f);
-    fprintf(stderr, "dump: wrote %s (%u sections, base %p)\n", path, nt->FileHeader.NumberOfSections, (void *)lib);
-}
-#endif
-
 /* ---- main -------------------------------------------------------------- */
 #define BIND(field, name) do { *(void **)(&api.field) = sym(name); if (!api.field) { fprintf(stderr, "missing export %s\n", name); return 2; } } while (0)
 
@@ -656,15 +606,14 @@ static const struct { const char *name; void (*fn)(void); int by_default; } SCEN
 
 int main(int argc, char **argv)
 {
-    const char *libpath, *tracepath, *dump = NULL, *replay_path = NULL;
+    const char *libpath, *tracepath, *replay_path = NULL;
     int i, repeat = 1, nsel = 0, r, wine = 0;
     const char *sel[16];
 
-    if (argc < 3) { fprintf(stderr, "usage: %s <library> <trace.jsonl> [scenario ...] [--repeat N] [--dump FILE] [--cycles N]\n", argv[0]); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: %s <library> <trace.jsonl> [scenario ...] [--repeat N] [--cycles N]\n", argv[0]); return 2; }
     libpath = argv[1]; tracepath = argv[2];
     for (i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "--repeat") && i + 1 < argc) repeat = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--dump") && i + 1 < argc) dump = argv[++i];
         else if (!strcmp(argv[i], "--cycles") && i + 1 < argc) bench_cycles = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--replay") && i + 1 < argc) replay_path = argv[++i];
         else if (nsel < 16) sel[nsel++] = argv[i];
@@ -693,11 +642,6 @@ int main(int argc, char **argv)
             wine, repeat);
     fflush(out);
 
-#ifdef _WIN32
-    if (dump) { J_U32 dev = 0; if (api.open(NULL, &dev) == 0) api.close(dev); dump_image(dump); }
-#else
-    (void)dump;
-#endif
 
     if (replay_path) {
         fprintf(out, "{\"begin\":\"replay\",\"file\":"); json_str(replay_path); fputs("}\n", out);
