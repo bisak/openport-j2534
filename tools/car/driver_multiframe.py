@@ -14,7 +14,7 @@ script's parser, and it judges the result the way a J2534 consumer does:
 Read-only: the CAN id and the service both pass the capture tool's envelope.
 
   python3 tools/car/driver_multiframe.py --request 0902
-  python3 tools/car/driver_multiframe.py --tx 0x7B5 --rx 0x7B4 --request 1A87
+  python3 tools/car/driver_multiframe.py --tx 0x7E0 --rx 0x7E8 --request 22F190
 
 Exit status is the verdict, so a wrapper cannot mistake one outcome for another:
   0  one clean reassembled message, preceded by a first-frame indication

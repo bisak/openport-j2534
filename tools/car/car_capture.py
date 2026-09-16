@@ -102,6 +102,7 @@ SAFE_SERVICES = {
     0x07: "OBD mode 07 - pending DTCs",
     0x09: "OBD mode 09 - vehicle information",
     0x0A: "OBD mode 0A - permanent DTCs",
+    0x18: "KWP ReadDiagnosticTroubleCodesByStatus",
     0x1A: "KWP ReadEcuIdentification",
     0x21: "KWP ReadDataByLocalIdentifier",
     0x22: "ReadDataByIdentifier",
