@@ -111,10 +111,12 @@ of this harness is what confirms it.
   `atn6 <id> <seq>`. `PROTOCOL.md` §4 had `atm` as "purpose unknown" and
   `atp` as the periodic command that the firmware rejects for every interval.
   On the cable `atm` answers `arm6 0 <seq>`, then `arm6 1 <seq>`; the
-  firmware's periodic facility works, and this driver's host-side scheduling
-  can be replaced by it.
+  firmware's periodic facility works. This driver still schedules on the
+  host: measured against a bench ECU, a firmware periodic keeps transmitting
+  after the application is killed (`PROTOCOL.md` §11).
 - **`SetProgrammingVoltage(pin, VOLTAGE_OFF)` is sent as `atv 12 -1`**, the
-  value printed signed, where this driver sends `4294967295`.
+  value printed signed. This driver sends it the same way since 2026-09-16;
+  the firmware accepts both forms.
 - **Open is `ati`, `ata`; close is `atz`.** `PassThruReadVersion` answers from
   the `ati` reply cached at open and touches the wire not at all.
   `READ_VBATT` is `atr 16 <seq>`.
@@ -186,8 +188,20 @@ against. Both are listed so a decision is a decision and not an accident.
 | `PassThruStartMsgFilter` with a NULL mask | `ERR_FAILED` (7) | `ERR_NULL_PARAMETER` (4) |
 | `PassThruClose` twice | `ERR_INVALID_DEVICE_ID` (26) | `ERR_DEVICE_NOT_CONNECTED` (8) |
 | `PassThruReadMsgs(timeout=0)` on an idle channel | returns after ~6 ms | returns in microseconds |
+| `PassThruIoctl(READ_PROG_VOLTAGE)` with `pInput` NULL, as J2534-1 passes it | -1, nothing sent | reads pin 12 |
+| `SetProgrammingVoltage(7, SHORT_TO_GROUND)` under an open ISO9141 channel | `atv 7 -2`, 0 | `ERR_CHANNEL_IN_USE` (20), nothing sent |
+| `PassThruConnect(ISO14230)` while K is grounded | 0 | `ERR_CHANNEL_IN_USE` (20) |
+| `SetProgrammingVoltage` on a second pin while one holds a voltage | `atv`, 0 | `ERR_EXCEEDED_LIMIT` (12), nothing sent |
+| `PassThruConnect(SCI_A_ENGINE)` and other ids with no firmware channel | `ato0`, `are 3`, `ERR_INVALID_PROTOCOL_ID` | `ERR_INVALID_PROTOCOL_ID`, nothing sent |
 
-Everything else in the sequence, including every timeout code, every
+The last five are from cable replays on 2026-09-16 (`PROTOCOL.md` §5, §8).
+Every J2534-2 channel id, `TX_PARAM_STOP_BITS`, `FAST_INIT` on the L line and
+`SNIFF_MODE` produce the same commands from both drivers. Of the rest:
+grounding K under a K-line channel ends its communication, and neither the
+firmware nor the vendor DLL objects. With a pin in `pInput`, both drivers send
+`atr <pin>` and agree.
+
+Everything else in the `errors` sequence, including every timeout code, every
 `ERR_CHANNEL_IN_USE`, `ERR_INVALID_FILTER_ID`, `ERR_INVALID_MSG_ID` and
 `ERR_NOT_SUPPORTED`, agrees.
 
@@ -216,6 +230,13 @@ as upper bounds.
 
 ## Running against the cable
 
+The image bakes `iface.reg` into its Wine registry. An image built from an
+older `iface.reg` (before the public release it carried the bench cable's own
+serial) registers a device the container never links, and the vendor DLL
+answers "no devices available" without sending a byte. `ab.sh` labels the
+image with a hash of `Dockerfile` and `iface.reg` and rebuilds it when they
+change.
+
 `ab.sh --cable /dev/cu.usbmodemXXXX` serves the tty on `127.0.0.1:5455` with
 `ttybridge.py`, the container reaches it as `host.docker.internal:5455` and
 turns it back into a pty; the vendor DLL then drives the real cable. Our side
@@ -241,6 +262,11 @@ returns. `ab.sh --replay` runs one recording through the vendor DLL and
 through `libj2534.dylib` against identical simulators and compares the wire
 byte for byte, command by command, payloads included, with only the
 open/close handshake (`ati`/`ata`/`atz`, known to differ) set aside.
+
+A recording is plain text, one call per line, so a probe can also be written
+by hand. `ioctl <dev> 14 <pin>` passes the pin through `pInput` to
+`READ_PROG_VOLTAGE`, which is how the vendor DLL was shown to take it
+(`PROTOCOL.md` §8).
 
 ```bash
 tools/ab-official/record.sh out/app.rec \

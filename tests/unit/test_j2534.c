@@ -200,13 +200,167 @@ static void programming_voltage(void)
     mock_clear_tx();
     CHECK_EQ(PassThruSetProgrammingVoltage(dev, 12, 0xFFFFFFFFUL),
              STATUS_NOERROR, "VOLTAGE_OFF is always allowed");
-    CHECK(tx_contains("atv 12 4294967295 "), "VOLTAGE_OFF reaches the wire");
+    CHECK(tx_contains("atv 12 -1 "), "VOLTAGE_OFF reaches the wire signed, as the vendor sends it");
 
     setenv("OPENPORT_ENABLE_PROG_VOLTAGE", "1", 1);
     mock_clear_tx();
     CHECK_EQ(PassThruSetProgrammingVoltage(dev, 12, 17000), STATUS_NOERROR,
              "enabled voltage is applied");
     CHECK(tx_contains("atv 12 17000 "), "enabled voltage reaches the wire");
+    unsetenv("OPENPORT_ENABLE_PROG_VOLTAGE");
+    shut(dev);
+}
+
+/* The firmware grounds K or L under an open ISO9141 channel without complaint,
+ * which ends communication on it. */
+static void kline_pins_are_not_grounded_under_a_channel(void)
+{
+    J_U32 dev = open_device(), ch = 0, ch2 = 0;
+
+    setenv("OPENPORT_ENABLE_PROG_VOLTAGE", "1", 1);
+    CHECK_EQ(PassThruConnect(dev, ISO9141, 0, 10400, &ch), STATUS_NOERROR, "connect ISO9141");
+    mock_clear_tx();
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 7, SHORT_TO_GROUND), ERR_CHANNEL_IN_USE,
+             "K is not grounded under an open K-line channel");
+    CHECK(!tx_contains("atv"), "refused grounding never reaches the wire");
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 15, SHORT_TO_GROUND), STATUS_NOERROR,
+             "L is free under a K-line channel: the firmware's use of it is unmeasured");
+    PassThruDisconnect(ch);
+    CHECK_EQ(PassThruConnect(dev, ISO9141, 0, 10400, &ch2), STATUS_NOERROR,
+             "and a K-line channel opens with L grounded");
+    PassThruDisconnect(ch2);
+    CHECK_EQ(PassThruConnect(dev, ISO14230_L, 0, 10400, &ch2), ERR_CHANNEL_IN_USE,
+             "but an L-line channel does not");
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 15, VOLTAGE_OFF), STATUS_NOERROR, "release L");
+
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 7, SHORT_TO_GROUND), STATUS_NOERROR,
+             "K grounded with no channel open");
+    CHECK_EQ(PassThruConnect(dev, ISO14230, ISO9141_K_LINE_ONLY, 10400, &ch), ERR_CHANNEL_IN_USE,
+             "a K-line channel is refused while K is grounded");
+    CHECK_EQ(PassThruConnect(dev, ISO15765, 0, 500000, &ch), STATUS_NOERROR,
+             "CAN is unaffected");
+    PassThruDisconnect(ch);
+    CHECK_EQ(PassThruConnect(dev, ISO9141_L, 0, 10400, &ch), STATUS_NOERROR,
+             "and so is an L-line channel, which does not use K");
+    unsetenv("OPENPORT_ENABLE_PROG_VOLTAGE");
+    shut(dev);
+}
+
+/* J2534-1 requires ten periodic messages per channel. */
+static void periodic_limit_is_per_channel(void)
+{
+    J_U32 dev = open_device(), can = 0, iso = 0, id = 0;
+    PASSTHRU_MSG m;
+    int i;
+
+    PassThruConnect(dev, CAN, 0, 500000, &can);
+    PassThruConnect(dev, ISO15765, 0, 500000, &iso);
+    memset(&m, 0, sizeof m);
+    m.ProtocolID = CAN;
+    m.DataSize = 5;
+    m.Data[2] = 0x07; m.Data[3] = 0xFF;
+    for (i = 0; i < 10; i++)
+        CHECK_EQ(PassThruStartPeriodicMsg(can, &m, &id, 1000), STATUS_NOERROR,
+                 "ten periodic messages on one channel");
+    CHECK_EQ(PassThruStartPeriodicMsg(can, &m, &id, 1000), ERR_EXCEEDED_LIMIT,
+             "the eleventh is refused");
+    m.ProtocolID = ISO15765;
+    m.DataSize = 6;
+    CHECK_EQ(PassThruStartPeriodicMsg(iso, &m, &id, 1000), STATUS_NOERROR,
+             "another channel has its own ten");
+    CHECK_EQ(PassThruStopPeriodicMsg(can, id), ERR_INVALID_MSG_ID,
+             "and its id does not stop a message on the first channel");
+    CHECK_EQ(PassThruIoctl(can, CLEAR_PERIODIC_MSGS, NULL, NULL), STATUS_NOERROR, "clear");
+    CHECK_EQ(PassThruIoctl(iso, CLEAR_PERIODIC_MSGS, NULL, NULL), STATUS_NOERROR, "clear");
+    shut(dev);
+}
+
+static void sniff_mode_is_refused(void)
+{
+    J_U32 dev = open_device(), ch = 0;
+
+    mock_clear_tx();
+    CHECK_EQ(PassThruConnect(dev, CAN, SNIFF_MODE, 500000, &ch), ERR_NOT_SUPPORTED,
+             "SNIFF_MODE is refused: the cable acknowledges regardless");
+    CHECK(!tx_contains("ato"), "and nothing is opened");
+    CHECK_EQ(PassThruConnect(dev, CAN, 0, 500000, &ch), STATUS_NOERROR,
+             "a normal channel still opens");
+    shut(dev);
+}
+
+/* Every voltage pin shares one supply, so a second pin would silently move
+ * the first pin's voltage. */
+static void one_pin_carries_voltage(void)
+{
+    J_U32 dev = open_device();
+
+    setenv("OPENPORT_ENABLE_PROG_VOLTAGE", "1", 1);
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 13, 5000), STATUS_NOERROR, "5 V on pin 13");
+    mock_clear_tx();
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 12, 9000), ERR_EXCEEDED_LIMIT,
+             "a second pin is refused");
+    CHECK(!tx_contains("atv"), "and never reaches the wire");
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 13, 8000), STATUS_NOERROR,
+             "the same pin can be changed");
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 12, SHORT_TO_GROUND), STATUS_NOERROR,
+             "grounding another pin is not a voltage");
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 13, VOLTAGE_OFF), STATUS_NOERROR, "pin 13 off");
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 12, 9000), STATUS_NOERROR,
+             "then another pin may take the supply");
+    unsetenv("OPENPORT_ENABLE_PROG_VOLTAGE");
+    shut(dev);
+
+    dev = open_device();
+    setenv("OPENPORT_ENABLE_PROG_VOLTAGE", "1", 1);
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 13, 5000), STATUS_NOERROR,
+             "a reopened session starts with no pin powered");
+    unsetenv("OPENPORT_ENABLE_PROG_VOLTAGE");
+    shut(dev);
+}
+
+/* J2534-2 ids open the firmware channels Tactrix's DLL opens them on, and the
+ * J2534-1 ids the firmware has no channel for never reach it. Firmware
+ * channels 7-9 are the L line and the jack: sending SCI_A_ENGINE as `ato7`
+ * opened ISO9141 on L and reported success. */
+static void j2534_2_channels(void)
+{
+    J_U32 dev = open_device(), ch = 0;
+    static const struct { J_U32 proto; J_U32 channel; const char *wire; } map[] = {
+        { ISO9141_CH1,  3, "ato3 " }, { ISO14230_CH1, 4, "ato4 " },
+        { CAN_CH1,      5, "ato5 " }, { ISO15765_CH1, 6, "ato6 " },
+        { ISO9141_L,    7, "ato7 " }, { ISO14230_L,   8, "ato8 " },
+        { ISO9141_INNO, 9, "ato9 " },
+    };
+    static const J_U32 refused[] = { J1850VPW, J1850PWM, SCI_A_ENGINE, SCI_A_TRANS,
+                                     SCI_B_ENGINE, SCI_B_TRANS, 0, 0x9080UL };
+    size_t i;
+
+    for (i = 0; i < sizeof map / sizeof map[0]; i++) {
+        mock_clear_tx();
+        CHECK_EQ(PassThruConnect(dev, map[i].proto, 0, 10400, &ch), STATUS_NOERROR,
+                 map[i].wire);
+        CHECK_EQ(ch, map[i].channel, map[i].wire);
+        CHECK(tx_contains(map[i].wire), "sent as %s", map[i].wire);
+        CHECK_EQ(PassThruDisconnect(ch), STATUS_NOERROR, "disconnect");
+    }
+
+    CHECK_EQ(PassThruConnect(dev, ISO9141, 0, 10400, &ch), STATUS_NOERROR, "ISO9141");
+    CHECK_EQ(PassThruConnect(dev, ISO9141_K, 0, 10400, &ch), ERR_CHANNEL_IN_USE,
+             "ISO9141_K is the same channel");
+    PassThruDisconnect(3);
+
+    mock_clear_tx();
+    for (i = 0; i < sizeof refused / sizeof refused[0]; i++)
+        CHECK_EQ(PassThruConnect(dev, refused[i], 0, 7812, &ch), ERR_INVALID_PROTOCOL_ID,
+                 "a protocol with no firmware channel is refused");
+    CHECK(!tx_contains("ato"), "and none of them reaches the wire");
+
+    setenv("OPENPORT_ENABLE_PROG_VOLTAGE", "1", 1);
+    CHECK_EQ(PassThruConnect(dev, ISO9141_L, 0, 10400, &ch), STATUS_NOERROR, "ISO9141_L");
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 15, SHORT_TO_GROUND), ERR_CHANNEL_IN_USE,
+             "L is not grounded under an L-line channel");
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 7, SHORT_TO_GROUND), STATUS_NOERROR,
+             "K is free under it");
     unsetenv("OPENPORT_ENABLE_PROG_VOLTAGE");
     shut(dev);
 }
@@ -354,6 +508,18 @@ static void ioctls(void)
 
     CHECK_EQ(PassThruIoctl(dev, READ_PROG_VOLTAGE, NULL, &v), STATUS_NOERROR,
              "READ_PROG_VOLTAGE");
+    CHECK(tx_contains("atr 12 "), "READ_PROG_VOLTAGE without a pin reads pin 12");
+    {
+        J_U32 pin = PIN_VADJ;
+        mock_clear_tx();
+        CHECK_EQ(PassThruIoctl(dev, READ_PROG_VOLTAGE, &pin, &v), STATUS_NOERROR,
+                 "READ_PROG_VOLTAGE with a pin, as Tactrix's DLL takes it");
+        CHECK(tx_contains("atr 17 "), "the named pin reaches the wire");
+        CHECK_EQ(v, 5794, "and its reading comes back");
+        pin = 2;
+        CHECK_EQ(PassThruIoctl(dev, READ_PROG_VOLTAGE, &pin, &v), ERR_PIN_INVALID,
+                 "an unreadable pin is the device's ERR_PIN_INVALID");
+    }
 
     PassThruConnect(dev, ISO15765, 0, 500000, &ch);
 
@@ -916,6 +1082,11 @@ void test_j2534(void)
     periodic_is_real();
     periodic_stop_waits_for_inflight();
     programming_voltage();
+    kline_pins_are_not_grounded_under_a_channel();
+    one_pin_carries_voltage();
+    periodic_limit_is_per_channel();
+    sniff_mode_is_refused();
+    j2534_2_channels();
     late_reply_is_not_reused();
     write_timeout_is_a_call_budget();
     queue_overrun_is_reported();

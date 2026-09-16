@@ -29,18 +29,21 @@
 
 #define OP_DEVICE_ID        1UL
 #define OP_DEFAULT_CMD_MS   1000u
-#define OP_MAX_PERIODIC     8
+/* J2534-1 requires at least ten periodic messages per channel, and the
+ * firmware's own facility holds ten (measured 2026-09-16). */
+#define OP_PERIODIC_PER_CH  10
+#define OP_MAX_PERIODIC     (OP_PERIODIC_PER_CH * OP_MAX_CHANNELS)
 
 #define OP_API_VERSION      "04.04"
 #define OP_DLL_VERSION      "openport-j2534 " OPENPORT_VERSION
 
-/* Pins the firmware exposes to `atr`, established by probing every pin
- * number: everything else answers ERR_PIN_INVALID. See docs/PROTOCOL.md. */
+/* The firmware answers `atr` for pins 8, 12, 16 and 17 and ERR_PIN_INVALID
+ * for every other (docs/PROTOCOL.md section 8). READ_PROG_VOLTAGE reads pin 12
+ * unless the caller names a pin, as Tactrix's DLL lets it. */
 #define OP_PIN_PROG_VOLTAGE 12
 #define OP_PIN_VBATT        16
-
-/* J2534's sentinel for "stop supplying programming voltage". */
-#define OP_VOLTAGE_OFF      0xFFFFFFFFUL
+#define OP_PIN_K            7
+#define OP_PIN_L            15
 
 /* ---- helpers ------------------------------------------------------------ */
 
@@ -150,6 +153,26 @@ static long simple_cmd(op_device *d, const char *line, size_t len,
 }
 
 static int channel_valid(J_U32 id) { return id < OP_MAX_CHANNELS; }
+
+/*
+ * Whether a channel of this protocol drives the pin. The firmware grounds K or
+ * L on request while ISO9141 is open on it (measured 2026-09-16), and so does
+ * Tactrix's DLL, which silently kills the channel. J2534-1 lets a K-line
+ * channel use L for initialisation unless opened ISO9141_K_LINE_ONLY, but
+ * whether this firmware drives L on channels 3 and 4 is unmeasured, so L is
+ * guarded only on the J2534-2 L-line channels, which certainly use it.
+ */
+static int protocol_uses_pin(J_U32 protocol, J_U32 pin)
+{
+    switch (op_protocol_channel(protocol)) {
+    case 3: case 4:
+        return pin == OP_PIN_K;
+    case 7: case 8:
+        return pin == OP_PIN_L;
+    default:
+        return 0;
+    }
+}
 
 static op_channel *channel_of(op_device *d, J_U32 id)
 {
@@ -425,6 +448,7 @@ long PassThruConnect(J_U32 DeviceID, J_U32 ProtocolID, J_U32 Flags,
     char line[OP_CMD_MAX];
     size_t n;
     long rc;
+    int fw;
 
     op_err_clear();
     rec_line("connect %lu %lu %lu %lu", (unsigned long)DeviceID, (unsigned long)ProtocolID, (unsigned long)Flags, (unsigned long)BaudRate);
@@ -433,36 +457,58 @@ long PassThruConnect(J_U32 DeviceID, J_U32 ProtocolID, J_U32 Flags,
         return fail(ERR_INVALID_DEVICE_ID, "PassThruConnect");
     if (pChannelID == NULL)
         return fail(ERR_NULL_PARAMETER, "PassThruConnect(pChannelID)");
-    if (!channel_valid(ProtocolID))
+    fw = op_protocol_channel(ProtocolID);
+    if (fw < 0)
         return fail(ERR_INVALID_PROTOCOL_ID, "PassThruConnect");
-    if (d->ch[ProtocolID].open)
+    if (d->ch[fw].open)
         return fail(ERR_CHANNEL_IN_USE, "PassThruConnect");
+    /* Firmware 1.17.4877 accepts SNIFF_MODE and ignores it: on a sniffing
+     * channel, alone with a bench ECU, a transmit still went out and was
+     * acknowledged, which a listen-only controller cannot do; the same held
+     * with Tactrix's own logger flags, SNIFF_MODE | CAN_ID_BOTH, on a first
+     * open after reset (measured 2026-09-16, PROTOCOL.md section 11). A caller
+     * that asked not to acknowledge must not be told it got that. */
+    if (Flags & SNIFF_MODE) {
+        op_err_set("PassThruConnect: SNIFF_MODE is accepted by the firmware but "
+                   "the cable still acknowledges frames");
+        return ERR_NOT_SUPPORTED;
+    }
     if (BaudRate == 0)
         return fail(ERR_INVALID_BAUDRATE, "PassThruConnect");
+    {
+        J_U32 pin;
+        for (pin = 0; pin < 32; pin++) {
+            if ((d->pins_grounded & (1u << pin)) &&
+                protocol_uses_pin(ProtocolID, pin)) {
+                op_err_set("PassThruConnect: pin %lu is shorted to ground",
+                           (unsigned long)pin);
+                return ERR_CHANNEL_IN_USE;
+            }
+        }
+    }
 
-    n = op_cmd_open(line, sizeof line, (unsigned)ProtocolID,
+    n = op_cmd_open(line, sizeof line, (unsigned)fw,
                     (uint32_t)Flags, (uint32_t)BaudRate);
     if (n == 0) return fail(ERR_FAILED, "PassThruConnect: command too long");
 
     rc = simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
     if (rc != STATUS_NOERROR) return fail(rc, "PassThruConnect");
 
-    /* The device names channels by protocol id — proven by opening 6, seeing
-     * a second open rejected with ERR_CHANNEL_IN_USE, closing `atc6`, and
-     * finding the open accepted again. So the channel id we hand back is the
-     * protocol id, which is also what the device expects on every later
-     * command. */
-    memset(&d->ch[ProtocolID], 0, sizeof d->ch[ProtocolID]);
-    d->ch[ProtocolID].open     = 1;
-    d->ch[ProtocolID].protocol = (uint32_t)ProtocolID;
-    d->ch[ProtocolID].flags    = (uint32_t)Flags;
-    d->ch[ProtocolID].baud     = (uint32_t)BaudRate;
+    /* The device names channels by number — proven by opening 6, seeing a
+     * second open rejected with ERR_CHANNEL_IN_USE, closing `atc6`, and
+     * finding the open accepted again. So the channel id we hand back is that
+     * number, which is also what the device expects on every later command;
+     * messages carry the protocol id the caller connected with. */
+    memset(&d->ch[fw], 0, sizeof d->ch[fw]);
+    d->ch[fw].open     = 1;
+    d->ch[fw].protocol = (uint32_t)ProtocolID;
+    d->ch[fw].flags    = (uint32_t)Flags;
+    d->ch[fw].baud     = (uint32_t)BaudRate;
 
-    *pChannelID = ProtocolID;
-    rec_line("= %lu", (unsigned long)ProtocolID);
-    op_logf("connect protocol %lu baud %lu -> channel %lu",
-            (unsigned long)ProtocolID, (unsigned long)BaudRate,
-            (unsigned long)ProtocolID);
+    *pChannelID = (J_U32)fw;
+    rec_line("= %d", fw);
+    op_logf("connect protocol %lu baud %lu -> channel %d",
+            (unsigned long)ProtocolID, (unsigned long)BaudRate, fw);
     return STATUS_NOERROR;
 }
 
@@ -608,7 +654,7 @@ static long write_one(op_device *d, J_U32 channel, const PASSTHRU_MSG *m,
      * the device reject it.
      */
     {
-        J_U32 proto = d->ch[channel].protocol;
+        J_U32 proto = op_protocol_base(d->ch[channel].protocol);
         size_t lo = 1, hi = sizeof m->Data;
         if (proto == CAN)            { lo = 4; hi = 12; }   /* id + up to 8 */
         else if (proto == ISO15765)  { lo = (m->TxFlags & ISO15765_ADDR_TYPE) ? 6 : 5;
@@ -627,7 +673,7 @@ static long write_one(op_device *d, J_U32 channel, const PASSTHRU_MSG *m,
      * only when ISO15765_FRAME_PAD is set. TxFlags belong to the application,
      * so this does not rewrite them — it records the likely cause of the
      * silence the caller is about to see. */
-    if (d->ch[channel].protocol == ISO15765 &&
+    if (op_protocol_base(d->ch[channel].protocol) == ISO15765 &&
         !(m->TxFlags & ISO15765_FRAME_PAD) && m->DataSize < 12)
         op_logf("channel %lu: ISO15765 transmit without ISO15765_FRAME_PAD; a "
                 "conforming ECU ignores a diagnostic frame with DLC < 8",
@@ -753,8 +799,17 @@ long PassThruStartPeriodicMsg(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
         return fail(ERR_INVALID_MSG, "PassThruStartPeriodicMsg");
 
     pthread_mutex_lock(&g_periodic_lock);
-    for (i = 0; i < OP_MAX_PERIODIC; i++)
-        if (!g_periodic[i].used) { slot = i; break; }
+    {
+        int on_channel = 0;
+        for (i = 0; i < OP_MAX_PERIODIC; i++) {
+            if (g_periodic[i].used) {
+                if (g_periodic[i].channel == ChannelID) on_channel++;
+            } else if (slot < 0) {
+                slot = i;
+            }
+        }
+        if (on_channel >= OP_PERIODIC_PER_CH) slot = -1;
+    }
 
     if (slot < 0) {
         pthread_mutex_unlock(&g_periodic_lock);
@@ -962,16 +1017,40 @@ long PassThruSetProgrammingVoltage(J_U32 DeviceID, J_U32 PinNumber, J_U32 Voltag
      * that is wired to something else, so applying voltage requires a
      * deliberate opt-in. Turning it OFF is always allowed. */
     gate = getenv("OPENPORT_ENABLE_PROG_VOLTAGE");
-    if (Voltage != OP_VOLTAGE_OFF && (gate == NULL || gate[0] != '1')) {
+    if (Voltage != VOLTAGE_OFF && (gate == NULL || gate[0] != '1')) {
         op_err_set("Programming voltage is gated; set "
                    "OPENPORT_ENABLE_PROG_VOLTAGE=1");
         op_logf("refused programming voltage %lu mV on pin %lu: gate not set",
                 (unsigned long)Voltage, (unsigned long)PinNumber);
         return ERR_NOT_SUPPORTED;
     }
+    /* Every voltage pin is fed from one adjustable supply: with 5 V on pin 13,
+     * 9 V on pin 12 moved the supply to 9.3 V and pin 13 was not switched off
+     * (measured 2026-09-16), so a second pin silently changes the first. Pin 0,
+     * the 2.5 mm jack, drives J1962 pin 12 too while no plug is inserted. */
+    if (Voltage != VOLTAGE_OFF && Voltage != SHORT_TO_GROUND && PinNumber < 32 &&
+        (d->pins_powered & ~(1u << PinNumber)) != 0) {
+        op_err_set("PassThruSetProgrammingVoltage: another pin already has "
+                   "voltage, and all pins share one supply; switch it off first");
+        return ERR_EXCEEDED_LIMIT;
+    }
+    if (Voltage == SHORT_TO_GROUND) {
+        unsigned i;
+        for (i = 0; i < OP_MAX_CHANNELS; i++) {
+            if (d->ch[i].open &&
+                protocol_uses_pin(d->ch[i].protocol, PinNumber)) {
+                op_err_set("PassThruSetProgrammingVoltage: pin %lu carries "
+                           "open channel %u", (unsigned long)PinNumber, i);
+                return ERR_CHANNEL_IN_USE;
+            }
+        }
+    }
 
-    n = snprintf(line, sizeof line, "atv %lu %lu\r\n",
-                 (unsigned long)PinNumber, (unsigned long)Voltage);
+    /* Printed signed, as Tactrix's DLL sends it: VOLTAGE_OFF and
+     * SHORT_TO_GROUND go out as -1 and -2, the form the vendor exercises on
+     * every firmware. 1.17.4877 also accepts the unsigned form. */
+    n = snprintf(line, sizeof line, "atv %lu %ld\r\n",
+                 (unsigned long)PinNumber, (long)(int32_t)(uint32_t)Voltage);
     if (n < 0 || (size_t)n >= sizeof line)
         return fail(ERR_FAILED, "PassThruSetProgrammingVoltage");
 
@@ -981,6 +1060,13 @@ long PassThruSetProgrammingVoltage(J_U32 DeviceID, J_U32 PinNumber, J_U32 Voltag
         long rc = simple_cmd(d, line, (size_t)n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
         if (rc != STATUS_NOERROR)
             return fail(rc, "PassThruSetProgrammingVoltage");
+    }
+    if (PinNumber < 32) {
+        uint32_t bit = 1u << PinNumber;
+        d->pins_grounded &= ~bit;
+        d->pins_powered  &= ~bit;
+        if (Voltage == SHORT_TO_GROUND)  d->pins_grounded |= bit;
+        else if (Voltage != VOLTAGE_OFF) d->pins_powered  |= bit;
     }
     return STATUS_NOERROR;
 }
@@ -1202,7 +1288,12 @@ long PassThruIoctl(J_U32 ChannelID, J_U32 IoctlID, const void *pInput,
         return ioctl_read_pin(d, OP_PIN_VBATT, (J_U32 *)pOutput);
 
     case READ_PROG_VOLTAGE:
-        return ioctl_read_pin(d, OP_PIN_PROG_VOLTAGE, (J_U32 *)pOutput);
+        /* J2534-1 passes NULL. Tactrix's DLL reads the pin number through
+         * pInput and sends `atr <pin>` (measured under emulation, 2026-09-16);
+         * without it the vendor returns -1 and touches nothing. */
+        return ioctl_read_pin(d, pInput != NULL ? (unsigned)*(const J_U32 *)pInput
+                                                : OP_PIN_PROG_VOLTAGE,
+                              (J_U32 *)pOutput);
 
     case FIVE_BAUD_INIT:
         if (channel_of(d, ChannelID) == NULL)

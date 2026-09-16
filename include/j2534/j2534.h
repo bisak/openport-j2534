@@ -166,14 +166,28 @@ typedef unsigned long J_U32;
  * official driver installer). Documented here so callers written against
  * the vendor DLL find the same names; only the ones marked implemented are
  * honoured by this driver. --------------------------------------------- */
-#define SNIFF_MODE                  0x10000000UL /* Connect flag: listen without ACK (not implemented) */
+#define SNIFF_MODE                  0x10000000UL /* Connect flag: listen without ACK. Refused: the firmware accepts it and still acknowledges */
+/* J2534-2 channel ids. Tactrix's DLL opens them on these firmware channels. */
+#define CAN_CH1                     0x00009000UL /* firmware 5, same as CAN */
+#define ISO9141_CH1                 0x00009240UL /* firmware 3, K line, same as ISO9141 */
+#define ISO9141_CH2                 0x00009241UL /* firmware 7, L line */
+#define ISO9141_CH3                 0x00009242UL /* firmware 9, RS-232 receive on the 2.5 mm jack */
+#define ISO9141_K                   ISO9141_CH1
+#define ISO9141_L                   ISO9141_CH2
+#define ISO9141_INNO                ISO9141_CH3
+#define ISO14230_CH1                0x00009320UL /* firmware 4, K line, same as ISO14230 */
+#define ISO14230_CH2                0x00009321UL /* firmware 8, L line */
+#define ISO14230_K                  ISO14230_CH1
+#define ISO14230_L                  ISO14230_CH2
+#define ISO15765_CH1                0x00009400UL /* firmware 6, same as ISO15765 */
+#define TX_PARAM_STOP_BITS          0x9000UL     /* GET/SET_CONFIG: serial stop bits, 1 by default (passed through) */
 #define ISO15765_EXT_ADDR           0x00000080UL /* RxStatus alias of ISO15765_ADDR_TYPE */
 #define VOLTAGE_OFF                 0xFFFFFFFFUL /* SetProgrammingVoltage: pin off (implemented) */
-#define SHORT_TO_GROUND             0xFFFFFFFEUL /* SetProgrammingVoltage: pin to ground (not gated off; untested) */
-#define PIN_VADJ                    17UL         /* internal adjustable rail; readable with atr */
+#define SHORT_TO_GROUND             0xFFFFFFFEUL /* SetProgrammingVoltage: pin to ground (gated like a voltage; refused on K under a K-line channel, L under an L-line one) */
+#define PIN_VADJ                    17UL         /* adjustable output supply, not a J1962 pin; READ_PROG_VOLTAGE with pInput -> 17 */
 #define CAN_MIXED_FORMAT            0x8000UL     /* SET_CONFIG: 0 off, 1 on, 2 all frames (passed through) */
-#define ERR_OEM_VOLTAGE_TOO_HIGH    0x77UL       /* device error for SetProgrammingVoltage */
-#define ERR_OEM_VOLTAGE_TOO_LOW     0x78UL
+#define ERR_OEM_VOLTAGE_TOO_HIGH    0x77UL       /* device error for SetProgrammingVoltage: above 20000 mV */
+#define ERR_OEM_VOLTAGE_TOO_LOW     0x78UL       /* below 5000 mV */
 #define TX_IOCTL_BASE               0x70000UL    /* Tactrix-private IOCTLs (not implemented) */
 #define TX_IOCTL_APP_SERVICE        (TX_IOCTL_BASE + 0)
 #define TX_IOCTL_SET_DLL_DEBUG_FLAGS (TX_IOCTL_BASE + 1)

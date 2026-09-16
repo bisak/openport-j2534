@@ -105,8 +105,10 @@ so a second device can be added without restructuring.
 | ISO15765 (CAN + ISO-TP) | yes — segmentation is done by the cable's firmware |
 | CAN (raw) | yes |
 | ISO9141, ISO14230 (K-line) | yes, but see the conformance matrix |
-| SCI A/B | **not supported.** The firmware acknowledges `ato7`/`ato8`/`ato9`, but Tactrix's own documentation marks SCI unsupported, and a channel-open acknowledgement is not evidence of protocol support |
-| J1850 VPW/PWM | **no** — the hardware rejects it |
+| ISO9141, ISO14230 on the L line (`ISO9141_L`, `ISO14230_L`) | opens the channels Tactrix's DLL opens; **no data measured** |
+| RS-232 receive on the 2.5 mm jack (`ISO9141_INNO`, for Innovate MTS) | opens, `TX_PARAM_STOP_BITS` configurable; **no data measured** |
+| SCI A/B | **no** — refused with `ERR_INVALID_PROTOCOL_ID`, as Tactrix's DLL does; the firmware's channels 7–9 are the L line and the jack, not SCI |
+| J1850 VPW/PWM | **no** — the firmware rejects it; Tactrix lists it as "support pending" |
 
 ## J2534 conformance
 
@@ -121,7 +123,7 @@ against a vehicle.
 | `PassThruConnect` / `Disconnect` | complete |
 | `PassThruReadMsgs` | complete; timeout honoured exactly as given |
 | `PassThruWriteMsgs` | complete |
-| `PassThruStartPeriodicMsg` / `StopPeriodicMsg` | complete, host-scheduled, 8 concurrent |
+| `PassThruStartPeriodicMsg` / `StopPeriodicMsg` | complete, host-scheduled, 10 per channel |
 | `PassThruStartMsgFilter` / `StopMsgFilter` | complete (PASS, BLOCK, FLOW_CONTROL) |
 | `PassThruSetProgrammingVoltage` | complete, **gated** — see below |
 | `PassThruReadVersion` | complete |
@@ -138,7 +140,7 @@ against a vehicle.
 | 7, 8 | `CLEAR_TX_BUFFER`, `CLEAR_RX_BUFFER` | complete |
 | 9, 10 | `CLEAR_PERIODIC_MSGS`, `CLEAR_MSG_FILTERS` | complete |
 | 11–13 | functional message table | `ERR_NOT_SUPPORTED` — J1850 only, which this hardware rejects |
-| 14 | `READ_PROG_VOLTAGE` | complete |
+| 14 | `READ_PROG_VOLTAGE` | complete; reads pin 12, or the pin `pInput` points to as in Tactrix's DLL (8, 12, 16, or 17 for the adjustable supply) |
 
 ### Known gaps
 
@@ -152,7 +154,8 @@ against a vehicle.
   them).
 - **K-line frame layout** is implemented from three independent sources but
   not yet measured on this project's hardware (`PROTOCOL.md` §7).
-- `SCI_B_TRANS` (protocol 10) is rejected by the device.
+- The L-line and jack channels are wired to what Tactrix's DLL sends, but no
+  L-line ECU or Innovate device has been attached to confirm their data.
 
 ## Programming voltage
 
@@ -164,10 +167,23 @@ bench and bootloader reflash procedures. It is implemented (`atv`), and it is
 OPENPORT_ENABLE_PROG_VOLTAGE=1 ./your-tool
 ```
 
-Without that, applying a voltage returns `ERR_NOT_SUPPORTED` and nothing
-reaches the cable. Switching it **off** (`VOLTAGE_OFF`) is always permitted, so
-a caller can always make the pin safe. Only the off path has been exercised on
-real hardware.
+Without that, applying a voltage or `SHORT_TO_GROUND` returns
+`ERR_NOT_SUPPORTED` and nothing reaches the cable. Switching it **off**
+(`VOLTAGE_OFF`) is always permitted, so a caller can always make the pin safe.
+
+The cable accepts 5000–20000 mV (outside that, `ERR_OEM_VOLTAGE_TOO_LOW` or
+`_TOO_HIGH`), and every voltage pin is fed from one supply: a second pin would
+silently move the first one's voltage, so it returns `ERR_EXCEEDED_LIMIT` until
+the first is switched off. `READ_PROG_VOLTAGE` with pin 17 reads the supply.
+
+Grounding K (pin 7) while an ISO9141 or ISO14230 channel is open, or L
+(pin 15) while an L-line channel is open, returns `ERR_CHANNEL_IN_USE`, and so
+does opening such a channel while this session holds its pin grounded. The firmware and Tactrix's DLL both allow it, and it
+silently ends K-line communication.
+
+Pin 12 is also the tip of the 2.5 mm jack: with a plug inserted, the cable
+disconnects it from the vehicle connector, and `atv 12` drives the jack
+instead. Which pins accept what is in `docs/PROTOCOL.md` §8.
 
 ## Logging
 

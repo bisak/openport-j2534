@@ -321,6 +321,7 @@ static void openport_responder(const char *line, size_t len,
     } else if (strncmp(buf, "atr", 3) == 0) {
         if (sscanf(buf + 3, " %u", &a) == 1 && a == 16) mock_push_reply("arr 16 12480");
         else if (a == 12) mock_push_reply("arr 12 0");
+        else if (a == 17) mock_push_reply("arr 17 5794");
         else mock_push_reply("are 19");
     } else if (strncmp(buf, "atf", 3) == 0) {
         char r[32];

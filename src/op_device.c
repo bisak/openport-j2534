@@ -48,6 +48,37 @@ static void deadline_in(struct timespec *ts, unsigned ms)
 
 /* ---- reassembly --------------------------------------------------------- */
 
+/*
+ * Measured by opening each id through Tactrix's DLL against the cable
+ * (docs/PROTOCOL.md section 5). The DLL sends `ato0` for J1850 and SCI, which
+ * the firmware refuses; firmware channels 7, 8 and 9 are the L line and the
+ * 2.5 mm jack, not SCI.
+ */
+int op_protocol_channel(J_U32 protocol)
+{
+    switch (protocol) {
+    case ISO9141:  case ISO9141_CH1:  return 3;
+    case ISO14230: case ISO14230_CH1: return 4;
+    case CAN:      case CAN_CH1:      return 5;
+    case ISO15765: case ISO15765_CH1: return 6;
+    case ISO9141_CH2:                 return 7;
+    case ISO14230_CH2:                return 8;
+    case ISO9141_CH3:                 return 9;
+    default:                          return -1;
+    }
+}
+
+J_U32 op_protocol_base(J_U32 protocol)
+{
+    switch (protocol) {
+    case ISO9141_CH1: case ISO9141_CH2: case ISO9141_CH3: return ISO9141;
+    case ISO14230_CH1: case ISO14230_CH2:                 return ISO14230;
+    case CAN_CH1:                                         return CAN;
+    case ISO15765_CH1:                                    return ISO15765;
+    default:                                              return protocol;
+    }
+}
+
 static void queue_push(op_channel *c, const PASSTHRU_MSG *m)
 {
     if (c->qcount == OP_RXQ_DEPTH) {
@@ -163,7 +194,7 @@ static void absorb_frame(op_device *d, const op_reply *r)
      * raw CAN frame as one J2534 message so a passive logger sees atomic
      * frames rather than a reassembly stream.
      */
-    if (c->protocol == CAN) {
+    if (op_protocol_base(c->protocol) == CAN) {
         indicate(d, c, r, (loopback ? TX_MSG_TYPE : 0) | wide, 0, 1); /* whole message */
         return;
     }
@@ -470,6 +501,8 @@ op_status op_device_open(op_device *d)
     if (d->open) return OP_OK;
 
     memset(&d->ch, 0, sizeof d->ch);
+    d->pins_grounded = 0;
+    d->pins_powered  = 0;
     d->accum_len   = 0;
     d->reply_valid = 0;
     d->cmd_waiting = 0;

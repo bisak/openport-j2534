@@ -54,17 +54,26 @@ SUPPORTED_PROTOCOLS = {3, 4, 5, 6, 7, 8, 9}
 KLINE_PROTOCOLS     = {3, 4}
 
 # Configuration parameters per protocol, PROTOCOL.md section 8. ISO15765 and
-# ISO14230 were swept on the cable; ISO9141 is MODELLED as ISO14230's set,
-# CAN and SCI as ISO15765's set without the ISO-TP parameters. Values are the
-# J2534-1 defaults.
+# ISO14230 were swept on the cable; ISO9141 and the L-line and jack channels
+# 7-9 are MODELLED as ISO14230's set, CAN as ISO15765's set without the ISO-TP
+# parameters. Values are the J2534-1 defaults; 0x9000 is Tactrix's stop bits,
+# read back as 1 on channels 3 and 9.
 _ISO15765_PARAMS = {1: 500000, 3: 0, 23: 80, 24: 1, 30: 0, 31: 0, 34: 0, 35: 0, 37: 0}
 _KLINE_PARAMS    = {1: 10400, 3: 0, 7: 20, 10: 55, 12: 5, 14: 300, 15: 20, 16: 20,
-                    17: 50, 18: 300, 19: 300, 20: 25, 21: 50, 22: 0, 25: 300, 32: 8, 33: 0}
+                    17: 50, 18: 300, 19: 300, 20: 25, 21: 50, 22: 0, 25: 300, 32: 8, 33: 0,
+                    0x9000: 1}
 _CAN_PARAMS      = {1: 500000, 3: 0, 23: 80, 24: 1}
 PARAMS_BY_PROTOCOL = {3: _KLINE_PARAMS, 4: _KLINE_PARAMS, 5: _CAN_PARAMS,
-                      6: _ISO15765_PARAMS, 7: _CAN_PARAMS, 8: _CAN_PARAMS, 9: _CAN_PARAMS}
+                      6: _ISO15765_PARAMS, 7: _KLINE_PARAMS, 8: _KLINE_PARAMS, 9: _KLINE_PARAMS}
 SUPPORTED_PARAMS    = _ISO15765_PARAMS
-READABLE_PINS       = {12: 0, 16: 12480, 17: 5751}
+READABLE_PINS       = {8: 0, 12: 0, 16: 12480, 17: 5751}
+# `atv` pins and limits, measured 2026-09-16. Pin 0 is the 2.5 mm jack, which
+# drives pin 12 while no plug is inserted; all voltage pins share one supply.
+VOLTAGE_PINS        = {0, 1, 3, 9, 11, 12, 13}
+GROUND_PINS         = VOLTAGE_PINS | {7, 10, 15}
+VOLTAGE_MIN_MV      = 5000
+VOLTAGE_MAX_MV      = 20000
+VADJ_IDLE_MV        = 5751
 
 STS_START    = 0x80
 STS_END      = 0x40
@@ -387,8 +396,12 @@ class OpenPortSim:
         # `ata` closes every open channel, exactly like `atz` (measured
         # 2026-09-13: a filter on a channel opened before `ata` answers
         # `are 2` after it).
-        if verb == "a":  self.channels.clear(); return self._ok()
-        if verb == "z":  self.channels.clear(); return self._ok()
+        if verb in ("a", "z"):
+            # Both also switch every voltage output off (measured 2026-09-16).
+            self.channels.clear()
+            READABLE_PINS[12] = 0
+            READABLE_PINS[17] = VADJ_IDLE_MV
+            return self._ok()
         if verb == "i":  return self._reply(f"ari main code version : {FW_VERSION}\r\n")
 
         if verb == "o":  return self._cmd_open(rest)
@@ -445,10 +458,10 @@ class OpenPortSim:
         if ch is None or len(args) < 3:            return self._err(ERR_FAILED)
         if ch not in SUPPORTED_PROTOCOLS:          return self._err(ERR_INVALID_PROTOCOL_ID)
         if ch in self.channels:                    return self._err(ERR_CHANNEL_IN_USE)
-        # Protocols sharing a pin group are mutually exclusive, with
-        # ERR_INVALID_PROTOCOL_ID rather than IN_USE: ISO9141/ISO14230 share
-        # the K line, SCI A engine/trans share pins 7/12 (measured 2026-09-13).
-        # There is no cap on the number of channels: 5, 6, 7 and 9 open together.
+        # Protocols sharing a line are mutually exclusive, with
+        # ERR_INVALID_PROTOCOL_ID rather than IN_USE: ISO9141/ISO14230 on K
+        # (3/4), and on L (7/8), measured 2026-09-13 and identified through
+        # Tactrix's DLL 2026-09-16. There is no cap on the number of channels.
         for a, b in ((3, 4), (7, 8)):
             if ch in (a, b) and (a in self.channels or b in self.channels):
                 return self._err(ERR_INVALID_PROTOCOL_ID)
@@ -475,11 +488,17 @@ class OpenPortSim:
     def _cmd_voltage(self, rest):
         args = rest.strip().split()
         if len(args) < 2: return self._err(ERR_INVALID_MSG)
-        try: pin, mv = int(args[0]), int(args[1])
+        try: pin, mv = int(args[0]), int(args[1]) & 0xFFFFFFFF   # the DLL prints -1/-2
         except ValueError: return self._err(ERR_INVALID_MSG)
-        if mv == 0: return self._reply("are 120\r\n")   # measured; zero is refused
-        if mv == 0xFFFFFFFF: return self._ok()
-        READABLE_PINS[12] = mv if pin == 12 else READABLE_PINS[12]
+        if mv in (0xFFFFFFFF, 0xFFFFFFFE):
+            if pin not in GROUND_PINS: return self._err(ERR_PIN_INVALID)
+            if pin in (0, 12): READABLE_PINS[12] = 0
+            return self._ok()
+        if pin not in VOLTAGE_PINS: return self._err(ERR_PIN_INVALID)
+        if mv < VOLTAGE_MIN_MV: return self._err(120)
+        if mv > VOLTAGE_MAX_MV: return self._err(119)
+        READABLE_PINS[17] = mv
+        if pin in (0, 12): READABLE_PINS[12] = mv
         self._ok()
 
     def _cmd_get_config(self, rest):

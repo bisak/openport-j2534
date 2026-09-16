@@ -17,7 +17,9 @@ Every claim carries a confidence marker:
 
 The device was on a bench throughout: powered by USB, **not connected to a
 vehicle**. Everything requiring live bus traffic is therefore **[U]**, and
-§10 lists exactly what remains open.
+§10 lists exactly what remains open. The bench results that could have
+depended on battery power (§8) were repeated on 2026-09-16 with 11.9 V from a
+bench supply on pin 16; none changed.
 
 ---
 
@@ -143,9 +145,9 @@ means the verb does not exist.
 | `atr` | ` <pin>` | read a pin voltage | **[V]** |
 | `atv` | ` <pin> <millivolts>` | **programming voltage** | **[V]** |
 | `atl<ch>` | — | answers `aro`; what it clears is unmeasured. The vendor DLL never sends it (`CLEAR_RX_BUFFER` is host-side there) and this driver no longer does | **[P]** |
-| `atp` | ` <pin> <value>` | a **pin verb**, sharing `atv`'s argument shape (the vendor DLL's format-string table has one template, `at%c %d %d %u`, for both `p` and `v`). Takes ~0.5 s to answer; every `(pin, value)` tried on 2026-09-13 — pins 0, 1, 6, 12, 15; values 1, 5000, 20000, `SHORT_TO_GROUND`, `VOLTAGE_OFF` — answered `are 10`, value 0 `are 5`. Function unknown; the DLL is not seen sending it. Earlier revisions read it as "start periodic message" and swept an interval: that shape was simply wrong | **[V]** rejected |
+| `atp` | ` <pin> <value>` | a **pin verb**, sharing `atv`'s argument shape (the vendor DLL's format-string table has one template, `at%c %d %d %u`, for both `p` and `v`). Takes ~0.5 s to answer; every `(pin, value)` tried on 2026-09-13 — pins 0, 1, 6, 12, 15; values 1, 5000, 20000, `SHORT_TO_GROUND`, `VOLTAGE_OFF` — answered `are 10`, value 0 `are 5`. On 2026-09-16, with battery power, pin 2 (J1850+, which Tactrix's header says "supports 5V and 8V") answered the same: `are 10` for 1, 5000, 8000, 12000 and `VOLTAGE_OFF` (5000, 8000 and 12000 after ~1.3 s, the rest after ~0.3 s), `are 5` for 0. So it is not a usable J1850+ supply select on this firmware either. Function unknown; the DLL is not seen sending it. Earlier revisions read it as "start periodic message" and swept an interval: that shape was simply wrong | **[V]** rejected |
 | `atn<ch>` | `<msg_id>` | stop periodic message | **[P]** |
-| `atm<ch>` | `<interval_us> 0 <txflags> <len> <seq>` + payload | **start periodic message**, what the vendor DLL sends; replies `arm<ch> <id> <seq>`, ids from 0; `atn<ch> <id>` stops it, `are 13` for an unknown id | **[V]** |
+| `atm<ch>` | `<interval_us> 0 <txflags> <len> <seq>` + payload | **start periodic message**, what the vendor DLL sends; replies `arm<ch> <id> <seq>`; `atn<ch> <id>` stops it, `are 13` for an unknown id. Measured against a bench ECU on 2026-09-16 (§11) | **[V]** |
 | `aty<ch>` | `<len> 0` + request bytes | K-line **fast** init | **[V]** — measured: returns in ~108 ms, a 25/25 ms wake pulse |
 | `atw<ch>` | `<address>` (decimal, no payload) | K-line **five-baud** init; `atw3 51` for 0x33, as the vendor DLL sends it. The earlier reading `<len>` + address byte was wrong: the firmware took the 1 as the address and the byte as the start of the next command, which is why every five-baud init this project sent went to ECU 0x01 | **[V]** — blocks ~2450 ms, one byte clocked out at 5 baud |
 | `atx` | ? | exists, consumes a payload, purpose unknown | **[U]** |
@@ -225,14 +227,14 @@ ato3 0 10400 0    -> aro          ISO9141 open
 ato4 0 10400 0    -> are 3        ISO14230 refused while ISO9141 holds the K line
 atc3 / ato4       -> aro          and the other way round: ato3 is then are 3
 ato5, ato6, ato7  -> aro aro aro
-ato8 0 7812 0     -> are 3        SCI A trans refused while SCI A engine is open
+ato8 0 7812 0     -> are 3        ISO14230 on L refused while ISO9141 holds L
 ato9 0 7812 0     -> aro          four channels open at once: 5, 6, 7, 9
 ```
 
 So there is **no three-channel cap** — a third-party driver reports one, but
 its fourth open was a second `ato5`, which is `are 20` for being a duplicate,
-not for being the fourth. The pairs are ISO9141/ISO14230 (K line) and SCI A
-engine/trans.
+not for being the fourth. The pairs are ISO9141/ISO14230 on K (3/4) and on L
+(7/8); earlier revisions called 7/8 "SCI A engine/trans" (below).
 
 **Baud rate is not validated on open.** `ato5 0 123456 0`, `ato3 0 4800 0`,
 `ato4 0 9600 0` and `ato6 0 0 0` all answer `aro`. No `ERR_INVALID_BAUDRATE`
@@ -243,13 +245,28 @@ Protocols accepted, by sweeping `ato0..ato12`:
 
 | ID | Protocol | Accepted |
 |---|---|---|
-| 1, 2 | J1850 VPW / PWM | **no** — `are 3` |
+| 1, 2 | J1850 VPW / PWM | **no** — `are 3`. Tactrix's product description lists J1850 as "support pending" |
 | 3 | ISO9141 | yes |
 | 4 | ISO14230 (KWP2000) | yes |
 | 5 | CAN | yes |
 | 6 | ISO15765 | yes |
-| 7, 8, 9 | SCI A engine / A trans / B engine | yes |
+| 7 | ISO9141 on the L line (J2534-2 `ISO9141_CH2`, 0x9241) | yes |
+| 8 | ISO14230 on the L line (`ISO14230_CH2`, 0x9321) | yes |
+| 9 | RS-232 receive on the 2.5 mm jack (`ISO9141_CH3`, Tactrix's `ISO9141_INNO`, 0x9242) | yes |
 | 10+ | — | `are 3` **[P]** — the two-digit parse is unconfirmed |
+
+**Firmware channels 7, 8 and 9 are not SCI.** Earlier revisions assumed the
+channel number is the J2534-1 protocol id, which holds for 3–6 only. Opening
+every J2534-2 id through Tactrix's DLL against the cable (2026-09-16,
+`docs/AB-OFFICIAL.md`) showed the mapping above, plus `CAN_CH1` → 5,
+`ISO15765_CH1` → 6 and, by name, `ISO9141_CH1`/`ISO14230_CH1` → 3/4. For
+J1850 and SCI (ids 1, 2, 7–10) the DLL sends `ato0`, gets `are 3`, and
+returns `ERR_INVALID_PROTOCOL_ID`; Tactrix's header marks SCI "not
+supported". A driver that sends `ato7` for `SCI_A_ENGINE`, as this one did,
+opens ISO9141 on L and reports success. The L-line pair excludes each other
+but coexists with K-line and jack channels: `ato7`, `ato3 4096 …` and `ato9`
+open together. **[V]** for the mapping; the L line and the jack carrying data
+is **[U]**, with nothing attached.
 
 **ISO-TP segmentation and flow control are performed by the device firmware.**
 The host sends a whole service request and the firmware handles first frame,
@@ -557,32 +574,115 @@ unfiltered, so its behaviour was always correct; only this table was wrong.
 `LOOPBACK` is accepted and reads back, but on a bench with no bus a transmit
 still fails with `are 9` before any echo is produced — the echo follows a
 *successful* bus transmit. It cannot be used to generate traffic without a
-second CAN node. **[V]**
+second CAN node. **[V]** Tactrix states that vehicle communication needs
+battery voltage on pin 16 even when USB powers the unit, so this was repeated
+on 2026-09-16 with 11.9 V on pin 16: `att5 12 0 1000000` still answers `are 9`
+after 1.3 s. The failure is the missing acknowledging node, not missing power.
+With an ECU on the bus (§11) the same transmit answers `aro`, and `LOOPBACK`
+then delivers the separate `0x20` frame described in §7.
 
-`atr <pin>` — sweeping 0..20, **four** pins answer; all others give `are 19`:
+`atr <pin>` — sweeping 0..20, **four** pins answer; all others give `are 19`.
+The meanings are from Tactrix's header (`j2534_tactrix.h`, pin numbering
+section) and product description; the readings are measured:
 
-| Pin | Reading (bench, no vehicle) | Interpretation |
+| Pin | Reading | Meaning |
 |---|---|---|
-| 8 | `0` | J1962 pin 8, an OEM-optional pin. Reads zero with nothing attached |
-| 12 | `0` | programming-voltage sense, off |
-| 16 | `130`–`152`, drifting | J1962 pin 16, battery. Floating with no vehicle; **12 156–12 199 mV on a vehicle (measured 2026-09-13), so the unit is millivolts** **[V]** |
-| 17 | `5751`–`5794`, drifting | internal rail, ~5.8 V. Not a J1962 pin |
+| 8 | `0` with nothing attached | J1962 pin 8 (OEM8), an ADC input |
+| 12 | `0` with nothing attached | J1962 pin 12 (OEM12), an ADC input. **Not a programming-voltage sense**, as earlier revisions said: it is the same pin `atv 12` drives, and also the tip of the 2.5 mm jack (below) |
+| 16 | `130`–`152` floating on USB power; 11 894 mV from an 11.9 V bench supply; 12 156–12 199 mV on a vehicle | J1962 pin 16, battery |
+| 17 | `5729`–`5794`, drifting, with no output enabled | `PIN_VADJ`, the adjustable output supply that `atv` switches onto a pin. Not a J1962 pin |
 
-Units are millivolts, matching J2534's `READ_VBATT`. Pin 16 with a vehicle
-attached should read ~12 000. **[U]** — not confirmed without a car.
+Units are millivolts, matching J2534's `READ_VBATT`. **[V]**
+
+**`TX_PARAM_STOP_BITS` (0x9000)**, Tactrix's own configuration parameter,
+exists: `atg9 36864` reads 1 on the jack channel and `atg3 36864` on ISO9141,
+and `ats9 36864 2` is accepted and reads back 2 (2026-09-16, through the
+vendor DLL). **`SNIFF_MODE`** goes to the firmware in `ato`'s flags,
+`ato5 268435456 500000 0`, and is accepted, but **the cable still
+acknowledges** (§11). This driver refuses it with `ERR_NOT_SUPPORTED`. **[V]**
+
+**Tactrix's private IOCTLs** reach nothing on the wire when called with a
+NULL input: `TX_IOCTL_GET_DEVICE_INSTANCES` returns `ERR_NULL_PARAMETER`,
+`TX_IOCTL_SET_DEV_DEBUG_FLAGS` returns 0, `TX_IOCTL_APP_SERVICE` returns
+`ERR_FAILED`, all without a command. Their input structures are not in the
+header, so this driver does not implement them.
+
+**`READ_PROG_VOLTAGE` takes a pin in Tactrix's DLL.** J2534-1 passes `pInput`
+NULL. The vendor DLL instead reads a pin number through `pInput` (a pointer
+to it) and sends `atr <pin>`; with NULL it returns -1 and sends nothing
+(measured under emulation, 2026-09-16, `docs/AB-OFFICIAL.md`). This driver
+accepts both: the named pin when `pInput` is given, pin 12 when it is NULL.
+
+**The 2.5 mm jack takes pin 12 away from the vehicle.** Per Tactrix, the jack's
+tip is OEM12 and inserting a plug disconnects OEM12 from J1962 pin 12. With
+a plug in, `atr 12` reads the jack tip and `atv 12` drives it, not the
+vehicle. Its ring and sleeve are an RS-232 receive input for Innovate MTS
+devices, reached in J2534-2 as `ISO9141_INNO` (`ISO9141_CH3`, 0x9242); this
+firmware opens no channel for it (§10). **[U]** — no plug was inserted.
 
 ### Programming voltage **[V]**
 
 `atv <pin> <millivolts>`.
 
 ```
-atv 12 4294967295  -> aro        0xFFFFFFFF is J2534's VOLTAGE_OFF
+atv 12 -1          -> aro        J2534's VOLTAGE_OFF (0xFFFFFFFF); 4294967295 is accepted too
 atv 12 0           -> are 120    zero is rejected; use VOLTAGE_OFF
+atv 7 -2           -> aro        SHORT_TO_GROUND (0xFFFFFFFE); 4294967294 is accepted too
+atv 2 5000         -> are 19     pin 2 is not an atv pin, whatever the value
 ```
 
-Only the "off" path was exercised. **Applying voltage was deliberately not
-tested** — it energises a pin on the vehicle connector. This driver gates it
-behind `OPENPORT_ENABLE_PROG_VOLTAGE=1`; turning it off is always allowed.
+What each pin supports, from Tactrix's header and product description:
+
+| Pin | Supports |
+|---|---|
+| 0 (`AUX_PIN`, the 2.5 mm jack) | ground, voltage |
+| 1, 3, 9, 11, 12, 13 | ground, voltage |
+| 2 (J1850+) | 5 V and 8 V |
+| 7 (K), 10 (J1850−), 15 (L) | ground |
+| 8, 12, 16, 17 | reading (`atr`) |
+
+Measured on 2026-09-16: `SHORT_TO_GROUND` and `VOLTAGE_OFF` answer `aro` on
+pins 7 and 15, **including while ISO9141 is open on K**, and the vendor DLL
+passes the same calls through unchanged, sent signed (`atv 7 -2`, `atv 7 -1`).
+Grounding K kills the channel it carries. This driver therefore refuses to
+ground K under an open ISO9141 or ISO14230 channel, or L under an open L-line
+channel (7, 8), and refuses to open such a channel on a pin it has grounded
+(`ERR_CHANNEL_IN_USE` both ways). L is not guarded under K-line channels:
+J2534-1 lets them use L for initialisation unless opened
+`ISO9141_K_LINE_ONLY`, but whether this firmware drives L on channels 3 and 4
+is unmeasured and needs a scope on pin 15 during a five-baud init. `atv 2` answers `are 19`
+for 5000, 8000 and `VOLTAGE_OFF`, and `atp 2` answers `are 10` (§4), so the
+J1850+ 5 V/8 V supply is not reachable on this firmware, consistent with
+J1850 being unsupported (§5).
+
+**Applying a voltage** was measured on 2026-09-16, with only pins 4, 5, 6, 14
+and 16 wired on the bench:
+
+```
+atv 12 5000   -> aro        atr 12 -> 5075
+atv 12 12000  -> aro        atr 12 -> 12199, atr 17 -> 12330
+atv 12 20000  -> aro        atr 12 -> 20238
+atv 12 20001  -> are 119    ERR_OEM_VOLTAGE_TOO_HIGH, so is 25000
+atv 12 4999   -> are 120    ERR_OEM_VOLTAGE_TOO_LOW
+atv 13 5000 / atv 12 9000 -> aro aro, atr 17 -> 9302: one supply for all pins
+atv 0 8000    -> aro        atr 12 -> 8104: the jack drives pin 12, no plug in
+atv 12 7000 / ata         -> atr 12 -> 0: ata switches outputs off, so does atz
+```
+
+- **The range is 5000–20000 mV**, inclusive. Tactrix's product description
+  says 5–25 V; the firmware refuses anything above 20 V.
+- **Pin 17 reads back the supply** (`PIN_VADJ`) within about 3 %, and keeps
+  its last setpoint after the pin is switched off.
+- **All voltage pins share one supply.** Setting a second pin moves the first
+  to the new voltage without switching it off. This driver refuses a voltage
+  on a second pin while another holds one (`ERR_EXCEEDED_LIMIT`); the vendor
+  DLL passes it through.
+- **Pin 0 is pin 12** while no plug is in the jack.
+- **`ata` and `atz` release every output.** This driver sends both when it
+  opens, so a session never inherits a live pin.
+
+This driver gates voltages and `SHORT_TO_GROUND` behind
+`OPENPORT_ENABLE_PROG_VOLTAGE=1`; turning a pin off is always allowed.
 
 ---
 
@@ -660,7 +760,7 @@ remains as it was.
 | `atm`, `atw`, `atx`, `aty` | `atw` is five-baud init and `aty` is fast init (§4). `atx<ch> <n>` echoes its argument back in the error (`are 7 1`); `atm<ch>` fails immediately. Both remain unidentified |
 | The DLL's five-argument forms | accepted. `ato6 0 500000 0 1` answered **`aro 1`** — the device echoes the trailing sequence number back in its acknowledgement, which is what that argument is for. The five-argument `att` was accepted too |
 | Two-digit protocol numbers | `ato10`, `ato11`, `ato1`, `ato0` all give `are 3` |
-| Letter channel bytes (`atoC`, `atoD`, `atoS` for the J2534-2 L-line and AUX protocols that `emdzej/j2534` reads out of the DLL) | `are 7` on firmware 1.17.4877 for all three, and `atcC` too. Not this firmware's dialect, or not at this firmware level |
+| Letter channel bytes (`atoC`, `atoD`, `atoS` for the J2534-2 L-line and AUX protocols that `emdzej/j2534` reads out of the DLL) | `are 7`, with no sequence number: the letter is not parsed. Tactrix's DLL opens those protocols as `ato7`, `ato8` and `ato9` (§5, 2026-09-16); the letters are a misreading of its tables |
 
 **Still open, and why this car could not close them.**
 
@@ -727,9 +827,9 @@ remains as it was.
 5. ~~**What the vendor DLL's dialect gets back from the firmware**~~ —
    **settled on the bench 2026-09-13**: the sequence number is echoed on every
    reply (§3); `atm` is the working periodic command and answers
-   `arm<ch> <id> <seq>` (§4), so the firmware's periodic facility is usable
-   after all and host-side scheduling is a choice, not a necessity; `tbi` is
-   silent; `atv 12 -1` is accepted.
+   `arm<ch> <id> <seq>` (§4); `tbi` is silent; `atv 12 -1` is accepted.
+   Whether to schedule periodic messages in the firmware was settled against
+   a bench ECU on 2026-09-16: no (§11).
 4. **The transmit echo shape** with `LOOPBACK=1` — the one frame that arrived
    was anomalous: status `0x20` on channel digit `5` while the transmit was on
    channel 6, carrying four zero bytes where a CAN id was expected. Recorded
@@ -776,6 +876,54 @@ frame with no error. Half this sweep failed that way before the flow-control id
 was separated from the request id in `tools/car/driver_multiframe.py`. The
 single-frame services were unaffected, which is exactly what makes it
 misleading — it looks like the vehicle supports some services and not others.
+
+## 11. Against a bench ECU, 2026-09-16 **[V]**
+
+A production chassis ECU on a bench harness: OBD 4/5, 6, 14 and 16
+only, 60 Ω termination, 11.8 V supply, no other CAN node. The module
+broadcasts a 4-byte status frame every 20.0 ms, which makes it the acknowledging
+peer the earlier bench sessions lacked. Diagnostics went no further than one
+session-less identification request, which answered in two wire frames and
+reassembled to 22 bytes through the driver. Periodic tests used 0x7FF, an id
+absent from the module's receive table, with a zero payload.
+
+**Firmware periodic messages (`atm`).**
+
+| Question | Measured |
+|---|---|
+| Timing | 100 ms → 20 frames in 2 s, 100.0 ms apart; 1 ms and 5 ms intervals also hold |
+| Visibility | with `LOOPBACK` on, each transmission shows as the frame plus the `0x20` echo |
+| `atn` | answers in ~60 ms; no frame follows; the id then answers `are 13` |
+| `atc`, `ata`, `atz` | each stops every periodic on the channel |
+| **Host process killed (SIGKILL)** | **the periodic keeps running**: a second process that sent nothing saw 39 frames in the next ~4 s; it stopped only on `atn` |
+| Concurrency | 10 per channel; the eleventh `atm` answers `are 12` (`ERR_EXCEEDED_LIMIT`) |
+| Interval 0 | accepted (`arm`) and sends nothing |
+| Ids | never reused: they kept counting (1…18) across `atc`, `ata` and `atz` |
+
+This driver keeps scheduling periodic messages on the host. A firmware
+periodic outlives a crashed application, and J2534 gives the driver no chance
+to stop it; a host-scheduled message dies with the process. The next
+`PassThruOpen` would clear an orphan (it sends `atz` and `ata`), but nothing
+guarantees one happens. The driver's limit is 10 per channel, matching the
+firmware and J2534-1's minimum.
+
+**`SNIFF_MODE`.** Three windows on raw CAN with a pass-all filter: normal
+open, 2 s → 101 status frames; `ato5 268435456` (`SNIFF_MODE`), 3 s → 151
+frames; normal again, 2 s → 101 frames; 20.0 ms apart in all three. With the
+cable as the only other node, a channel that did not acknowledge would leave
+every status frame unacknowledged, and the module would retransmit instead of
+keeping its 20 ms schedule. That alone would not rule out a module that sends
+each frame once and never retries, so the controller's mode was tested
+directly: on a `SNIFF_MODE` channel `att5 12 0 1000000` answers `aro` in 60 ms
+and the frame appears on the bus, and a listen-only controller cannot
+transmit. The result is the same on a first open straight after `atz`/`ata`,
+and with the flags Tactrix's own `canlogger` sample uses,
+`SNIFF_MODE | CAN_ID_BOTH` (`ato5 268437504`). So firmware 1.17.4877 accepts
+the flag and ignores it. This driver returns `ERR_NOT_SUPPORTED` for it; a
+later firmware may implement it, and would need the same test.
+
+**Transmit with a peer.** `att5 12 0 1000000` answers `aro` (on an empty bus it
+is `are 9` after ~1.3 s, §8).
 
 ## Sources consulted for §7
 

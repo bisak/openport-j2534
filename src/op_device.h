@@ -82,10 +82,23 @@ typedef struct {
     size_t          accum_len;
 
     op_channel      ch[OP_MAX_CHANNELS];
+    /* Pins this session shorted to ground or put a voltage on and has not
+     * released. Opening sends `atz` and `ata`, and either one switches every
+     * voltage output off (measured 2026-09-16), so a new session starts clear.
+     * That they release a ground too is assumed: no readable pin shows it. */
+    uint32_t        pins_grounded;
+    uint32_t        pins_powered;
     char            fw_version[OP_VERSION_MAX];
 } op_device;
 
 op_device *op_device_get(void);
+
+/* The firmware channel a J2534 protocol id is opened on, or -1 when the
+ * firmware has none. J2534-2 ids share channels with their J2534-1 twins. */
+int op_protocol_channel(J_U32 protocol);
+
+/* The J2534-1 protocol whose framing a channel of this id uses. */
+J_U32 op_protocol_base(J_U32 protocol);
 
 /*
  * Test seam. The unit tests substitute a scripted in-memory transport so that
