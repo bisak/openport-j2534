@@ -925,6 +925,21 @@ later firmware may implement it, and would need the same test.
 **Transmit with a peer.** `att5 12 0 1000000` answers `aro` (on an empty bus it
 is `are 9` after ~1.3 s, §8).
 
+**Against Tactrix's DLL on live traffic** (`docs/AB-OFFICIAL.md` replays):
+
+- `ISO9141_CH1` opens as `ato3` and `ISO14230_CH1` as `ato4`, confirming the
+  two mappings §5 had by name only.
+- Raw CAN receive is message-for-message the same: the status frame arrives as
+  `RxStatus` 0, `DataSize` 8, `ExtraDataIndex` 8, CAN id first.
+- With `LOOPBACK` on and a pass-all filter, one transmit gives the application
+  two messages from both drivers: the frame itself (`RxStatus` 0, 12 bytes) and
+  a `TX_MSG_TYPE` message of four zero bytes.
+- **Receive queue.** Left unread for 30 s, the vendor DLL delivered all ~1,500
+  frames. This driver kept 64 and dropped 1,438 with `ERR_BUFFER_OVERFLOW`; its
+  queue held 64 whole `PASSTHRU_MSG`s. It now stores each message at its own
+  size in a 1 MiB ring per channel (about 35,000 raw CAN frames) and delivered
+  1,503 frames over the same 30 s with no gap.
+
 ## Sources consulted for §7
 
 | Source | What it settles | Authority |

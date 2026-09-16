@@ -22,7 +22,11 @@
 
 /* The device accepts single-digit protocol/channel ids only. */
 #define OP_MAX_CHANNELS   10
-#define OP_RXQ_DEPTH      64
+/* Receive queue per channel, in bytes. Messages are stored at their own size:
+ * ~17,000 raw CAN frames or ~250 of the largest ISO15765 messages. Tactrix's
+ * DLL held 1,460 CAN frames left unread for 29 s without a loss (measured
+ * 2026-09-16); a 64-message queue lost 1,438 of them. */
+#define OP_RXQ_BYTES      (1024u * 1024u)
 #define OP_MAX_FILTERS    16
 #define OP_ACCUM_CAP      (OP_MSG_MAX + OP_FRAME_MAX)
 #define OP_VERSION_MAX    64
@@ -36,8 +40,9 @@ typedef struct {
     PASSTHRU_MSG partial;        /* in-progress reassembly */
     int          partial_active;
 
-    PASSTHRU_MSG q[OP_RXQ_DEPTH];
-    unsigned     qhead, qtail, qcount;
+    uint8_t     *rq;             /* OP_RXQ_BYTES ring, allocated once, kept for the process */
+    size_t       rq_head, rq_tail, rq_used;
+    unsigned     qcount;         /* messages in the ring */
     unsigned     dropped;        /* queue overruns since last read */
 
     uint32_t     filters;        /* bitmask of live filter ids */
@@ -140,6 +145,10 @@ op_status op_device_pop(op_device *d, unsigned channel, PASSTHRU_MSG *out,
                         unsigned timeout_ms);
 
 void op_device_flush_channel(op_device *d, unsigned channel);
+
+/* Make a channel fresh for a new connection. Allocates its receive queue on
+ * first use; OP_ERR_IO when that allocation fails. */
+op_status op_device_reset_channel(op_device *d, unsigned channel);
 
 /* Number of messages the channel's queue has dropped since this was last
  * called, and reset. Reported to the caller so an overrun is never silent. */

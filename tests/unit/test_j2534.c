@@ -940,11 +940,13 @@ static void queue_overrun_is_reported(void)
 
     PassThruConnect(dev, ISO15765, 0, 500000, &ch);
 
-    /* More messages than the queue holds, delivered while nobody is reading. */
-    for (i = 0; i < OP_RXQ_DEPTH + 16; i++) {
+    /* More messages than the queue holds, delivered while nobody is reading.
+     * Each one is queued as a 24-byte header and its 6 data bytes. */
+    for (i = 0; i < (int)(OP_RXQ_BYTES / 30u) + 16; i++) {
         uint8_t f[] = { 'a','r','6', 0x0B, 0xC0, 0,0,0x10,(uint8_t)i,
                         0x00,0x00,0x07,0xE8, 0x7E, 0x00 };
         mock_push(f, sizeof f);
+        if (i % 2000 == 1999) usleep(20000);   /* the mock's own buffer is 64 KB */
     }
     usleep(300000);                        /* let the reader drain the pipe */
 
@@ -959,6 +961,41 @@ static void queue_overrun_is_reported(void)
         PassThruGetLastError(err);
         CHECK(strstr(err, "dropped") != NULL,
               "and says how many were lost: \"%s\"", err);
+    }
+    shut(dev);
+}
+
+/* A logger that reads rarely must get every frame. Tactrix's DLL delivered
+ * 1,460 CAN frames left unread for 29 s; a 64-message queue lost 1,438. Three
+ * rounds of 12,000 frames also carry the ring past its wraparound. */
+static void large_backlog_is_kept_in_order(void)
+{
+    J_U32 dev = open_device(), ch = 0, count;
+    static PASSTHRU_MSG got[256];
+    int round, i, total, in_order;
+    long rc;
+
+    PassThruConnect(dev, CAN, 0, 500000, &ch);
+    for (round = 0; round < 3; round++) {
+        for (i = 0; i < 12000; i++) {
+            uint8_t f[] = { 'a','r','5', 0x0B, 0x00, 0,0,0,0,
+                            0x00,0x00,0x03,0x59, (uint8_t)(i >> 8), (uint8_t)i };
+            mock_push(f, sizeof f);
+            if (i % 3000 == 2999) usleep(30000);   /* the mock's own buffer is 64 KB */
+        }
+        usleep(300000);
+        total = 0; in_order = 1;
+        do {
+            count = 256;
+            rc = PassThruReadMsgs(ch, got, &count, 0);
+            for (i = 0; i < (int)count; i++) {
+                int v = got[i].Data[4] << 8 | got[i].Data[5];
+                if (got[i].DataSize != 6 || v != ((total + i) & 0xFFFF)) in_order = 0;
+            }
+            total += (int)count;
+        } while (count > 0 && rc != ERR_BUFFER_OVERFLOW);
+        CHECK_EQ(total, 12000, "every frame of an unread backlog is delivered");
+        CHECK(in_order, "in order and intact, round %d", round);
     }
     shut(dev);
 }
@@ -1090,4 +1127,5 @@ void test_j2534(void)
     late_reply_is_not_reused();
     write_timeout_is_a_call_budget();
     queue_overrun_is_reported();
+    large_backlog_is_kept_in_order();
 }

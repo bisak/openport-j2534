@@ -6,6 +6,7 @@
 #include "op_log.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
@@ -79,9 +80,33 @@ J_U32 op_protocol_base(J_U32 protocol)
     }
 }
 
+/* A queued message: the six PASSTHRU_MSG header fields, then DataSize bytes. */
+typedef struct { uint32_t protocol, rx_status, tx_flags, timestamp, size, extra; } op_qhdr;
+
+static void ring_put(op_channel *c, const uint8_t *src, size_t n)
+{
+    size_t first = OP_RXQ_BYTES - c->rq_tail;
+    if (first > n) first = n;
+    memcpy(c->rq + c->rq_tail, src, first);
+    memcpy(c->rq, src + first, n - first);
+    c->rq_tail = (c->rq_tail + n) % OP_RXQ_BYTES;
+}
+
+static void ring_get(op_channel *c, uint8_t *dst, size_t n)
+{
+    size_t first = OP_RXQ_BYTES - c->rq_head;
+    if (first > n) first = n;
+    memcpy(dst, c->rq + c->rq_head, first);
+    memcpy(dst + first, c->rq, n - first);
+    c->rq_head = (c->rq_head + n) % OP_RXQ_BYTES;
+}
+
 static void queue_push(op_channel *c, const PASSTHRU_MSG *m)
 {
-    if (c->qcount == OP_RXQ_DEPTH) {
+    op_qhdr h;
+    size_t size = m->DataSize <= sizeof m->Data ? (size_t)m->DataSize : sizeof m->Data;
+
+    if (c->rq == NULL || c->rq_used + sizeof h + size > OP_RXQ_BYTES) {
         /*
          * Discard the arriving message, not the oldest one. J2534 requires it,
          * and it is also the safer answer: a caller that ignores the overflow
@@ -95,8 +120,15 @@ static void queue_push(op_channel *c, const PASSTHRU_MSG *m)
         c->dropped++;
         return;
     }
-    c->q[c->qtail] = *m;
-    c->qtail = (c->qtail + 1u) % OP_RXQ_DEPTH;
+    h.protocol  = (uint32_t)m->ProtocolID;
+    h.rx_status = (uint32_t)m->RxStatus;
+    h.tx_flags  = (uint32_t)m->TxFlags;
+    h.timestamp = (uint32_t)m->Timestamp;
+    h.size      = (uint32_t)size;
+    h.extra     = (uint32_t)m->ExtraDataIndex;
+    ring_put(c, (const uint8_t *)&h, sizeof h);
+    ring_put(c, m->Data, size);
+    c->rq_used += sizeof h + size;
     c->qcount++;
 }
 
@@ -500,7 +532,15 @@ op_status op_device_open(op_device *d)
     if (d == NULL) return OP_ERR_PARAM;
     if (d->open) return OP_OK;
 
-    memset(&d->ch, 0, sizeof d->ch);
+    {
+        unsigned i;
+        /* Keep each channel's queue buffer across sessions; the rest is reset. */
+        for (i = 0; i < OP_MAX_CHANNELS; i++) {
+            uint8_t *rq = d->ch[i].rq;
+            memset(&d->ch[i], 0, sizeof d->ch[i]);
+            d->ch[i].rq = rq;
+        }
+    }
     d->pins_grounded = 0;
     d->pins_powered  = 0;
     d->accum_len   = 0;
@@ -666,8 +706,17 @@ op_status op_device_pop(op_device *d, unsigned channel, PASSTHRU_MSG *out,
     }
 
     if (c->qcount > 0) {
-        *out = c->q[c->qhead];
-        c->qhead = (c->qhead + 1u) % OP_RXQ_DEPTH;
+        op_qhdr h;
+        ring_get(c, (uint8_t *)&h, sizeof h);
+        memset(out, 0, sizeof *out);
+        out->ProtocolID     = h.protocol;
+        out->RxStatus       = h.rx_status;
+        out->TxFlags        = h.tx_flags;
+        out->Timestamp      = h.timestamp;
+        out->DataSize       = h.size;
+        out->ExtraDataIndex = h.extra;
+        ring_get(c, out->Data, h.size);
+        c->rq_used -= sizeof h + h.size;
         c->qcount--;
         st = OP_OK;
     } else {
@@ -695,10 +744,26 @@ void op_device_flush_channel(op_device *d, unsigned channel)
     if (d == NULL || channel >= OP_MAX_CHANNELS) return;
     c = &d->ch[channel];
     pthread_mutex_lock(&d->lock);
-    c->qhead = c->qtail = c->qcount = 0;
+    c->rq_head = c->rq_tail = c->rq_used = 0;
+    c->qcount = 0;
     c->partial_active = 0;
     c->dropped = 0;
     pthread_mutex_unlock(&d->lock);
+}
+
+op_status op_device_reset_channel(op_device *d, unsigned channel)
+{
+    op_channel *c;
+    uint8_t *rq;
+
+    if (d == NULL || channel >= OP_MAX_CHANNELS) return OP_ERR_PARAM;
+    c = &d->ch[channel];
+    pthread_mutex_lock(&d->lock);
+    rq = c->rq != NULL ? c->rq : malloc(OP_RXQ_BYTES);
+    memset(c, 0, sizeof *c);
+    c->rq = rq;
+    pthread_mutex_unlock(&d->lock);
+    return rq != NULL ? OP_OK : OP_ERR_IO;
 }
 
 void op_device_quiet_tx(op_device *d, unsigned channel, int on)

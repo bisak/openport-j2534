@@ -499,7 +499,10 @@ long PassThruConnect(J_U32 DeviceID, J_U32 ProtocolID, J_U32 Flags,
      * finding the open accepted again. So the channel id we hand back is that
      * number, which is also what the device expects on every later command;
      * messages carry the protocol id the caller connected with. */
-    memset(&d->ch[fw], 0, sizeof d->ch[fw]);
+    if (op_device_reset_channel(d, (unsigned)fw) != OP_OK) {
+        op_err_set("PassThruConnect: no memory for the receive queue");
+        return ERR_FAILED;
+    }
     d->ch[fw].open     = 1;
     d->ch[fw].protocol = (uint32_t)ProtocolID;
     d->ch[fw].flags    = (uint32_t)Flags;

@@ -217,12 +217,12 @@ static long write_one(const char *sc, const char *name, J_U32 ch, J_U32 proto, J
 
 static long read_some(const char *sc, const char *name, J_U32 ch, J_U32 want, J_U32 timeout)
 {
-    static PASSTHRU_MSG in[8];
-    J_U32 cnt = want > 8 ? 8 : want; long rc; double t0; const char *d; char head[64];
+    static PASSTHRU_MSG in[64];
+    J_U32 cnt = want > 64 ? 64 : want; long rc; double t0; const char *d; char head[64];
     memset(in, 0, sizeof in);
     t0 = now_us();
     rc = api.read(ch, in, &cnt, timeout);
-    if (cnt > 8) cnt = 0;
+    if (cnt > 64) cnt = 0;
     d = msgs_detail("msgs", in, cnt);
     snprintf(head, sizeof head, "\"timeout\":%lu,\"received\":%lu,", (unsigned long)timeout, (unsigned long)cnt);
     if (d) {
@@ -520,6 +520,8 @@ static void replay(const char *path)
             J_U32 dev = 0; t0 = now_us(); rc = api.open(NULL, &dev);
             snprintf(detail, sizeof detail, "\"dev\":%lu", (unsigned long)dev);
             record(sc, step, rc, t0, detail); last = OPEN; last_live = dev;
+        } else if (!strcmp(verb, "sleep")) {       /* hand-written probes: let traffic queue */
+            sscanf(save, "%lu", &a); sleep_ms((int)a);
         } else if (!strcmp(verb, "close")) {
             sscanf(save, "%lu", &a); t0 = now_us(); record(sc, step, api.close(map_dev(a)), t0, NULL);
         } else if (!strcmp(verb, "version")) {
