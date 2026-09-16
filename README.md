@@ -120,8 +120,8 @@ against a vehicle.
 | Function | Status |
 |---|---|
 | `PassThruOpen` / `Close` | complete |
-| `PassThruConnect` / `Disconnect` | complete |
-| `PassThruReadMsgs` | complete; timeout honoured exactly as given |
+| `PassThruConnect` / `Disconnect` | complete, J2534-2 channel ids included; `SNIFF_MODE` refused (the firmware accepts it but still acknowledges frames) |
+| `PassThruReadMsgs` | complete; timeout honoured exactly as given; 1 MiB queue per channel, an overrun is reported as `ERR_BUFFER_OVERFLOW` |
 | `PassThruWriteMsgs` | complete |
 | `PassThruStartPeriodicMsg` / `StopPeriodicMsg` | complete, host-scheduled, 10 per channel |
 | `PassThruStartMsgFilter` / `StopMsgFilter` | complete (PASS, BLOCK, FLOW_CONTROL) |
@@ -134,7 +134,7 @@ against a vehicle.
 
 | ID | Name | Status |
 |---|---|---|
-| 1, 2 | `GET_CONFIG`, `SET_CONFIG` | complete (DATA_RATE, LOOPBACK, ISO15765_BS, ISO15765_STMIN; others `ERR_NOT_SUPPORTED`, as the device reports) |
+| 1, 2 | `GET_CONFIG`, `SET_CONFIG` | complete; passed to the firmware, whose supported set differs per protocol (`PROTOCOL.md` §8); an unsupported parameter returns `ERR_NOT_SUPPORTED`, as the device reports |
 | 3 | `READ_VBATT` | complete |
 | 4, 5 | `FIVE_BAUD_INIT`, `FAST_INIT` | implemented from the DLL-derived command form (`PROTOCOL.md` §4), five-baud with `SBYTE_ARRAY` in/out as the standard specifies, **untested on hardware** — needs a K-line vehicle |
 | 7, 8 | `CLEAR_TX_BUFFER`, `CLEAR_RX_BUFFER` | complete |
@@ -178,8 +178,9 @@ the first is switched off. `READ_PROG_VOLTAGE` with pin 17 reads the supply.
 
 Grounding K (pin 7) while an ISO9141 or ISO14230 channel is open, or L
 (pin 15) while an L-line channel is open, returns `ERR_CHANNEL_IN_USE`, and so
-does opening such a channel while this session holds its pin grounded. The firmware and Tactrix's DLL both allow it, and it
-silently ends K-line communication.
+does opening such a channel while this session holds its pin grounded. The
+firmware and Tactrix's DLL both allow it, and it silently ends communication
+on that line.
 
 Pin 12 is also the tip of the 2.5 mm jack: with a plug inserted, the cable
 disconnects it from the vehicle connector, and `atv 12` drives the jack
