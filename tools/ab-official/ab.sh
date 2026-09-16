@@ -46,7 +46,12 @@ if [[ $nobuild -eq 0 ]]; then
   cc -O2 -Wall -I"$root/include" -o "$here/j2534_trace" "$here/j2534_trace.c" || die "native harness build failed"
   command -v i686-w64-mingw32-gcc > /dev/null || die "i686-w64-mingw32-gcc missing: brew install mingw-w64"
   i686-w64-mingw32-gcc -O1 -Wall -I"$root/include" -o "$here/j2534_trace.exe" "$here/j2534_trace.c" "$here/wineshim.c" || die "win32 harness build failed"
-  docker image inspect "$image" > /dev/null 2>&1 || docker build -t "$image" "$here" || die "image build failed"
+  # The image bakes iface.reg into its Wine registry, so an image built from an
+  # older iface.reg names a device the container never links and the DLL finds
+  # none. Rebuild whenever the build context differs from the one it came from.
+  context=$(cat "$here/Dockerfile" "$here/iface.reg" | shasum -a 256 | cut -c1-16)
+  built=$(docker image inspect -f '{{index .Config.Labels "ab.context"}}' "$image" 2>/dev/null)
+  [[ $built == "$context" ]] || docker build --label "ab.context=$context" -t "$image" "$here" || die "image build failed"
 fi
 cp "$here/j2534_trace.exe" "$out/"
 # A replay is one recorded application (OPENPORT_RECORD, see docs/AB-OFFICIAL.md)
@@ -79,7 +84,9 @@ cleanup() { [[ -n ${LISTEN:-} ]] && kill "$LISTEN" 2>/dev/null; [[ -n ${SIM:-} ]
 trap cleanup EXIT
 run_bounded() { # run "$@" with a wall-clock budget; a hung DLL is a finding, not a hang
   "$@" & local pid=$!
-  ( sleep "$budget"; kill -9 "$pid" 2>/dev/null ) & local wd=$!
+  # Killing the subshell alone would orphan its sleep, which holds the caller's
+  # stdout open for the whole budget; the trap takes the sleep down with it.
+  ( trap 'kill $s 2>/dev/null; exit 0' TERM; sleep "$budget" & s=$!; wait $s; kill -9 "$pid" 2>/dev/null ) & local wd=$!
   wait "$pid"; local rc=$?; kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
   [[ $rc -eq 137 ]] && echo "### vendor run killed after ${budget}s" >> "$out/vendor.err"
   return $rc

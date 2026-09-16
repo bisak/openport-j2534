@@ -132,7 +132,7 @@ differential: diff-tools $(SHLIB)
 #   make ab-official AB_ARGS="-- open bench --cycles 50"
 AB_ARGS ?=
 ab-official-image:
-	docker build -t openport-ab-official tools/ab-official
+	docker build --label "ab.context=$$(cat tools/ab-official/Dockerfile tools/ab-official/iface.reg | shasum -a 256 | cut -c1-16)" -t openport-ab-official tools/ab-official
 ab-official: $(SHLIB)
 	tools/ab-official/ab.sh $(AB_ARGS)
 ab-official-cable: $(SHLIB)

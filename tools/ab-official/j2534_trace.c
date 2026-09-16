@@ -577,7 +577,7 @@ static void replay(const char *path)
         } else if (!strcmp(verb, "progv")) {
             sscanf(save, "%lu %lu %lu", &a, &b, &c); t0 = now_us(); record(sc, step, api.progv(map_dev(a), b, c), t0, NULL);
         } else if (!strcmp(verb, "ioctl")) {
-            SCONFIG cfg[32]; SCONFIG_LIST list; J_U32 v = 0; void *in = NULL, *out = NULL; int np = 0;
+            SCONFIG cfg[32]; SCONFIG_LIST list; J_U32 v = 0, pin = 0; void *in = NULL, *out = NULL; int np = 0;
             char *tok;
             a = strtoul(strtok_r(NULL, " ", &save), NULL, 10);
             b = strtoul(strtok_r(NULL, " ", &save), NULL, 10);
@@ -586,7 +586,8 @@ static void replay(const char *path)
                 cfg[np].Parameter = pp; cfg[np].Value = vv; np++;
             }
             if (b == SET_CONFIG || b == GET_CONFIG) { list.NumOfParams = (J_U32)np; list.ConfigPtr = cfg; in = &list; }
-            if (b == READ_VBATT) out = &v;
+            if (b == READ_VBATT || b == READ_PROG_VOLTAGE) out = &v;
+            if (b == READ_PROG_VOLTAGE && np > 0) { pin = (J_U32)cfg[0].Parameter; in = &pin; }
             t0 = now_us(); rc = api.ioctl(map_any(a), b, in, out);
             snprintf(detail, sizeof detail, "\"ioctl\":%lu,\"vbatt\":%lu", b, (unsigned long)v);
             record(sc, step, rc, t0, detail);
