@@ -155,13 +155,15 @@ class Wire:
         #                       START|END (0xC0) frame with id+data
         self.rx_framing = "measured"
         # How a message longer than one wire frame (250 bytes) is chunked:
-        #   id_first_only   chunks of (id+data); only the first chunk has the id
         #   id_every_chunk  every 0x00/0x40 chunk repeats the 4-byte CAN id
+        #   id_first_only   chunks of (id+data); only the first chunk has the id
         #   old             START carries id + first chunk, 0x00 middles, END last
-        # id_every_chunk is what Tactrix's own DLL reassembles correctly: fed
+        # id_every_chunk is the layout Tactrix's own DLL reassembles: fed
         # id_first_only it drops four bytes per continuation chunk, fed
         # id_every_chunk it returns the 600-byte reply intact (tools/ab-official,
-        # 2026-09-13). Not yet captured from the cable itself.
+        # 2026-09-13). The driver strips the id from every continuation chunk
+        # the same way, so the other two models are kept only to show what a
+        # consumer would see under them. Not yet captured from the cable itself.
         self.chunking = "id_every_chunk"
         # K-line (channels 3, 4) frame layout:
         #   asymmetric  0x00/0x20 data frames carry no timestamp; START/END/0x10
@@ -735,23 +737,45 @@ class OpenPortSim:
 
     def _cmd_periodic_vendor(self, rest, payload):
         """`atm<ch> <interval_us> 0 <txflags> <len> <seq>` + payload, the
-        periodic-message command Tactrix's DLL sends. Measured on the cable
-        2026-09-13: `arm<ch> <id> <seq>`, ids from 0; `atn<ch> <id>` stops it,
-        `are 13` for an unknown id. The transmits themselves are not modelled."""
+        periodic-message command Tactrix's DLL and this driver send. Measured
+        on the cable (PROTOCOL.md section 10): `arm<ch> <id> <seq>`, ids from
+        0; ten per channel, the eleventh `are 12`; `atn<ch> <id>` stops it,
+        `are 13` for an unknown id; the transmits keep their interval, produce
+        no transmit indication, and stop on `atc`/`ata`/`atz`."""
         ch, args = self._split_ch(rest)
         c = self.channels.get(ch)
         if c is None or len(args) < 4:
             return self._err(ERR_FAILED)
         try:
-            interval_us, length = int(args[0]), int(args[3])
+            interval_us, txflags, length = int(args[0]), int(args[2]), int(args[3])
         except ValueError:
             return self._err(ERR_FAILED)
         if length != len(payload):
             return self._err(ERR_INVALID_MSG)
+        if len(c.periodic) >= 10:
+            return self._err(12)
         pid = c.next_periodic_id
         c.next_periodic_id += 1
-        c.periodic[pid] = (interval_us / 1000.0, bytes(payload))
+        c.periodic[pid] = (interval_us / 1e6, bytes(payload), txflags)
+        threading.Thread(target=self._periodic_run, args=(ch, c, pid), daemon=True).start()
         self._reply(self._with_seq(f"arm{ch} {pid}"))
+
+    def _periodic_run(self, ch, c, pid):
+        while not self.closed and self.channels.get(ch) is c:
+            entry = c.periodic.get(pid)
+            if entry is None:
+                break
+            interval, payload, txflags = entry
+            time.sleep(interval)
+            if self.channels.get(ch) is not c or pid not in c.periodic:
+                break
+            self.tx_count += 1
+            self.tx_times.append(time.monotonic())
+            if c.config.get(3):                       # LOOPBACK enabled
+                self.send_message(ch, payload, loopback=True)
+            resp = self._ecu_response(ch, payload)
+            if resp is not None:
+                self.send_message(ch, resp)
 
     def _cmd_periodic_stop(self, rest):
         ch, args = self._split_ch(rest)

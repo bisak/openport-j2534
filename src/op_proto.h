@@ -145,6 +145,14 @@ size_t op_cmd_filter(char *out, size_t out_sz, unsigned ch,
                      uint32_t type, uint32_t txflags, size_t each_len); /* atf */
 size_t op_cmd_stop_filter(char *out, size_t out_sz,
                           unsigned ch, uint32_t filter_id);        /* atk */
+/* atm<ch> <interval_us> 0 <txflags> <len> + payload: the firmware's periodic
+ * message in the form Tactrix's DLL sends it (PROTOCOL.md section 4); the
+ * reply is arm<ch> <id>. atn<ch> <id> stops it. */
+size_t op_cmd_periodic_start(char *out, size_t out_sz, unsigned ch,
+                             uint32_t interval_us, uint32_t txflags,
+                             size_t payload_len);                  /* atm */
+size_t op_cmd_periodic_stop(char *out, size_t out_sz,
+                            unsigned ch, uint32_t msg_id);         /* atn */
 /* K-line init. Fast init: "aty<ch> <len> 0" followed by the StartCommunication
  * request bytes. Five-baud: "atw<ch> <address>", the address in decimal on
  * the command line and no payload, which is what Tactrix's own DLL sends

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-car_capture — settle every open question in docs/PROTOCOL.md section 10 in one
+car_capture — settle every open question in docs/PROTOCOL.md section 12 in one
 vehicle session.
 
 READ-ONLY. It opens channels, sets filters and sends standard diagnostic
@@ -631,55 +631,11 @@ def count_frames(buf):
     return sum(1 for e in parse_frames(buf) if e[0] == "FRAME")
 
 
-def q4_periodic(p, tx):
-    emit("\n### Q4. atp interval encoding")
-    emit("atp<ch> <len> <interval>. 100 was rejected with 'are 5 100'; sweep for the unit.")
-    emit("Largest first, and the sweep stops as soon as the unit is known.")
-    guard_tx(tx)
-    pl = struct.pack(">I", tx) + b"\x3e\x00"
-    accepted = 0
-    for iv in (65535, 1000, 256, 255, 50, 20, 10, 5, 1, 0):
-        p.resync()
-        p.cmd(b"ato6 0 500000 0\r\n", wait=0.6, show=False)
-        r = p.cmd(f"atp6 {len(pl)} {iv}\r\n".encode(), pl, 1.0, show=False)
-        s = r.decode("ascii", "replace").replace("\r", "\\r").replace("\n", "\\n")
-        emit(f"  interval={iv:<6} -> {s!r}")
-        if r.startswith(b"aro") or r.startswith(b"arp"):
-            buf = b""
-            try:
-                emit("      ACCEPTED — listening up to 3 s to measure the real period:")
-                t0 = time.time()
-                while time.time() - t0 < 3.0:
-                    buf += p.drain(0.2, idle=0.05)
-                    if count_frames(buf) >= 12:
-                        # Enough to measure. A small unit would otherwise keep
-                        # the diagnostic id busy for the rest of the window.
-                        emit("      (12 frames seen, stopping early)")
-                        break
-            finally:
-                # A periodic message left running would keep transmitting after
-                # we disconnect. Stop it, then reset the channel as a backstop.
-                p.cmd(b"atn6 0\r\n", wait=0.8, show=False)
-                p.cmd(b"atc6\r\n", wait=0.5, show=False)
-                emit("      [stopped]")
-            show_stream(buf)
-            ts = [e[4] for e in parse_frames(buf) if e[0] == "FRAME" and e[4]]
-            if len(ts) >= 2:
-                gaps = [b - a for a, b in zip(ts, ts[1:]) if b > a]
-                if gaps:
-                    period_ms = sorted(gaps)[len(gaps) // 2] / 1000.0
-                    emit(f"      measured period ≈ {period_ms:.1f} ms for interval={iv}"
-                         + (f" → unit ≈ {period_ms/iv:.3f} ms" if iv else ""))
-            accepted += 1
-            if accepted >= 2:
-                emit("  two accepted intervals measured; that fixes the unit. Sweep stopped.")
-                break
-
-
 def q5_unknown(p):
     emit("\n### Q5. atm / atw / atx on a live channel")
-    emit("Verbs whose meaning is unknown. Not read-only by construction, so this")
-    emit("section only runs with --unknown-verbs, ideally with the cable on a bench.")
+    emit("atm is the periodic message and atw the five-baud init (PROTOCOL.md section 4);")
+    emit("atx is still unknown. Not read-only by construction, so this section only")
+    emit("runs with --unknown-verbs, ideally with the cable on a bench.")
     p.resync()
     p.cmd(b"ato6 0 500000 0\r\n", wait=0.8, show=False)
     for c in (b"atm6\r\n", b"atm6 0\r\n", b"atm6 0 0\r\n",
@@ -1179,7 +1135,7 @@ def main():
     ap.add_argument("--kline-variants", default=None,
                     help="comma-separated subset of " + ",".join(v[0] for v in KLINE_INITS))
     ap.add_argument("--unknown-verbs", action="store_true",
-                    help="run Q5 (atm/atw/atx, meaning unknown) — bench only")
+                    help="run Q5 (bare atm/atw forms, atx) — bench only")
     ap.add_argument("--request", default=None,
                     help="live mode: one guarded ISO15765 request as hex, e.g. 22F190")
     ap.add_argument("--kline-init", default=None,
@@ -1242,7 +1198,6 @@ def main():
                 ("q9", q9_loopback, (args.tx, args.rx)),
                 ("q10", q10_raw_can_listen, ()),
                 ("q11", q11_config_readback, ()),
-                ("q4", q4_periodic, (args.tx,)),
                 ("q5", q5_unknown, ()),
                 ("q6", q6_protocols, ())]
     rc = 0

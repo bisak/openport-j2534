@@ -11,7 +11,12 @@
 #include <sys/time.h>
 #include <time.h>
 
-static op_device g_device;
+static op_device g_device = {
+    .lock     = PTHREAD_MUTEX_INITIALIZER,
+    .cmd_lock = PTHREAD_MUTEX_INITIALIZER,
+    .reply_cv = PTHREAD_COND_INITIALIZER,
+    .rx_cv    = PTHREAD_COND_INITIALIZER,
+};
 
 op_device *op_device_get(void) { return &g_device; }
 
@@ -133,23 +138,8 @@ static void queue_push(op_channel *c, const PASSTHRU_MSG *m)
 }
 
 /*
- * Fold one wire frame into the channel's queue.
- *
- * The status byte is a bitfield (START, END, LOOPBACK, TX_IND). What the bits
- * mean was measured on a vehicle, not inferred, and the measurement
- * contradicts the obvious reading. Recorded in PROTOCOL.md section 7 from a
- * vehicle session of 2026-06-17:
- *
- *   - A START frame without END carries the CAN id ONLY. It is an indication
- *     that a segmented message has begun, not the first chunk of its data.
- *     The data arrives later, in END-terminated frames that repeat the id.
- *   - A single-frame message arrives as one END frame. No START precedes it.
- *   - A TX_IND frame carries the CAN id only and means "transmitted".
- *
- * So a START-only frame and a TX_IND frame are each delivered as their own
- * J2534 indication message and never merged with data. Merging was the bug:
- * it produced a message with the CAN id twice and START_OF_MESSAGE set, which
- * every J2534 consumer discards as a first-frame marker.
+ * Queue one frame as its own message. Indications (J2534-1 section 8.6) report
+ * ExtraDataIndex zero; a whole message reports ExtraDataIndex = DataSize.
  */
 static void indicate(op_device *d, op_channel *c, const op_reply *r, J_U32 status,
                      int is_indication, int keep_data)
@@ -164,78 +154,51 @@ static void indicate(op_device *d, op_channel *c, const op_reply *r, J_U32 statu
     if (take > sizeof ind.Data) take = sizeof ind.Data;
     if (take > 0 && r->data != NULL) memcpy(ind.Data, r->data, take);
     ind.DataSize = (J_U32)take;
-    /*
-     * An indication reports zero here; an ordinary message reports DataSize.
-     * J2534-1 A.1.5.2 spells the first out for the ISO15765 first-frame
-     * indication — DataLength four, ExtraDataIndex zero. The "equal to
-     * DataLength" rule means "no extra bytes follow" and belongs to real
-     * messages, which is what a raw CAN frame delivered through here is.
-     */
     ind.ExtraDataIndex = is_indication ? 0 : ind.DataSize;
     queue_push(c, &ind);
     pthread_cond_broadcast(&d->rx_cv);
 }
 
+/*
+ * Fold one wire frame into the channel's queue. The frame shapes are the
+ * measured ones (PROTOCOL.md section 7): a START frame without END announces
+ * a segmented message and carries the CAN id only; the data follows in
+ * END-terminated frames that carry the id again; a message that fit one CAN
+ * frame is a single END frame; raw CAN frames carry neither bit.
+ */
 static void absorb_frame(op_device *d, const op_reply *r)
 {
     op_channel *c;
     PASSTHRU_MSG *p;
-    size_t room, take, skip;
+    J_U32 base, wide = 0;
+    size_t room, take, skip = 0;
     int loopback;
-    J_U32 wide;
 
     if (r->channel >= OP_MAX_CHANNELS) return;
     c = &d->ch[r->channel];
-
     if (!c->open) return;
 
+    base = op_protocol_base(c->protocol);
     loopback = (r->status & OP_STS_LOOPBACK) != 0;
-    /* The device marks a 29-bit identifier in the status byte; J2534 carries
-     * that to the application as a RxStatus bit. */
-    wide = (r->status & OP_STS_29BIT) ? CAN_29BIT_ID : 0;
+    /* Measured on CAN only; what the low nibble carries on K-line is unread. */
+    if ((base == CAN || base == ISO15765) && (r->status & OP_STS_29BIT))
+        wide = CAN_29BIT_ID;
 
     if (r->status & OP_STS_TX_IND) {
-        /*
-         * A TxDone carries no data. The device sends the CAN id with it and
-         * this driver used to pass that on, but J2534 Table 13 is explicit
-         * that DataLength is zero, no vendor sample reads the field, and this
-         * driver serialises commands — one transmit is in flight at a time —
-         * so there is never any ambiguity about which transmit completed. The
-         * id is still in the log for anyone debugging the wire.
-         */
-        if (c->quiet_tx) {
-            op_logf("channel %u: transmit indication for a periodic message, dropped "
-                    "(the firmware's periodic facility produces none)", r->channel);
-            return;
-        }
-        op_logf("channel %u: transmit indication for %s", r->channel,
-                r->data_len >= 4 ? "the frame just sent" : "a transmit");
-        indicate(d, c, r, TX_MSG_TYPE | TX_DONE | wide, 1, 0);
+        /* J2534-1 section 8.6: a TxDone carries the CAN id of the message
+         * just sent, which is what the frame holds. */
+        indicate(d, c, r, TX_MSG_TYPE | TX_DONE | wide, 1, 1);
         return;
     }
 
-    /*
-     * Raw CAN carries no transport layer: one wire frame is one whole message,
-     * and the firmware marks it neither START nor END. Measured on a 2012 VW
-     * Caddy: both our own echo and the
-     * ECU's reply arrive with status 0x00. Falling through to the reassembly
-     * path below would wait for an END bit that never comes and swallow every
-     * frame — which is exactly what happened until this was measured, and why
-     * PassThruReadMsgs returned ERR_BUFFER_EMPTY on a bus that was answering.
-     * opta-j2534-rs reaches the same conclusion independently, returning each
-     * raw CAN frame as one J2534 message so a passive logger sees atomic
-     * frames rather than a reassembly stream.
-     */
-    if (op_protocol_base(c->protocol) == CAN) {
-        indicate(d, c, r, (loopback ? TX_MSG_TYPE : 0) | wide, 0, 1); /* whole message */
+    if (base == CAN) {
+        indicate(d, c, r, (loopback ? TX_MSG_TYPE : 0) | wide, 0, 1);
         return;
     }
 
     if ((r->status & OP_STS_START) && !(r->status & OP_STS_END)) {
-        /* An in-progress reassembly cannot legitimately be open here: the
-         * device announces a new message only after finishing the last. If
-         * one is open, the stream lost its END frame; drop the partial rather
-         * than glue two messages together. */
+        /* The device announces a new message only after finishing the last,
+         * so an open reassembly here lost its END frame. */
         if (c->partial_active)
             op_logf("channel %u: new message announced with %lu bytes still "
                     "unterminated; discarding them", r->channel,
@@ -243,52 +206,35 @@ static void absorb_frame(op_device *d, const op_reply *r)
         c->partial_active = 0;
         indicate(d, c, r, (loopback ? (TX_MSG_TYPE | TX_DONE)
                                     : ISO15765_FIRST_FRAME) | wide, 1,
-                 loopback ? 0 : 1);   /* the announcement carries the CAN id */
+                 loopback ? 0 : 1);
         return;
     }
 
     p = &c->partial;
-
     if (!c->partial_active) {
         memset(p, 0, sizeof *p);
         p->ProtocolID = c->protocol;
         c->partial_active = 1;
+    } else if (base == ISO15765) {
+        /* Every chunk after the first repeats the 4-byte CAN id: the vendor
+         * DLL reassembles only that layout intact (docs/AB-OFFICIAL.md). */
+        if (r->data_len >= 4)
+            skip = 4;
+        else
+            op_logf("channel %u: continuation frame of %zu bytes carries no CAN id",
+                    r->channel, r->data_len);
     }
 
     p->Timestamp = r->timestamp_us;
     if (loopback) p->RxStatus |= TX_MSG_TYPE;
     p->RxStatus |= wide;
 
+    take = r->data_len - skip;
     room = sizeof p->Data - p->DataSize;
-    take = r->data_len;
-    skip = 0;
-
-    /*
-     * How a reply longer than one wire frame is split is the last open receive
-     * question (PROTOCOL.md §10): whether every chunk repeats the 4-byte CAN
-     * id, or only the first carries it. No ECU reached so far returns enough
-     * data to settle it, and the one segmented reply that was measured cannot
-     * discriminate — it had a single data frame, which both readings predict.
-     *
-     * Rather than bet on one, use what the message itself already tells us.
-     * The id is the first four bytes of whatever we have accumulated, so a
-     * continuation frame that begins with those same four bytes is repeating
-     * it and they are not payload. Under the repeating model this is exactly
-     * right; under the other it is a no-op unless the payload coincidentally
-     * matches the id on a frame boundary, which is logged when it happens.
-     */
-    if (p->DataSize >= 4 && take >= 4 && r->data != NULL &&
-        memcmp(r->data, p->Data, 4) == 0) {
-        skip = 4;
-        take -= 4;
-        op_logf("channel %u: continuation frame repeats the CAN id; treating "
-                "those 4 bytes as a header, not payload", r->channel);
-    }
-
     if (take > room) {
-        take = room;
         op_logf("reassembly overflow on channel %u: dropping %zu bytes",
-                r->channel, r->data_len - room);
+                r->channel, take - room);
+        take = room;
     }
     if (take > 0 && r->data != NULL) {
         memcpy(p->Data + p->DataSize, r->data + skip, take);
@@ -473,24 +419,21 @@ static void *reader_main(void *arg)
 
 
 /*
- * Bring the device to a known state.
- *
- * The device answers commands in order and echoes the sequence number a
- * command carried, so a reply is accepted only when it names the command it
- * answers (stash_reply). A stale reply left over from a previous session, a
- * seven-deep backlog after an interrupted one, or noise in the stream can
- * therefore no longer shift every subsequent answer by one: it is dropped as
- * belonging to nothing. Sync is then just a numbered reset and a numbered
- * close-all (`ata`), each of which must come back with its number.
- *
- * Runs with the reader thread already started; it is an ordinary command
- * exchange.
+ * Bring the device to a known state: a numbered reset and a numbered
+ * close-all, each answered by number. Replies are matched by sequence number
+ * (stash_reply), so whatever a previous session left in the pipe is dropped
+ * as belonging to nothing. Runs with the reader thread already started.
  */
 static op_status sync_device(op_device *d)
 {
     char line[OP_CMD_MAX];
+    op_reply r;
     int attempt;
     op_status st = OP_ERR_TIMEOUT;
+
+    /* Terminate a partial line a previous session may have left in the
+     * device's parser, as the vendor DLL does before its first command. */
+    (void)op_write(&d->t, (const uint8_t *)"\r\n\r\n", 4, 200);
 
     for (attempt = 0; attempt < 3 && st == OP_ERR_TIMEOUT; attempt++) {
         size_t n = op_cmd_reset(line, sizeof line);
@@ -500,30 +443,25 @@ static op_status sync_device(op_device *d)
     }
     if (st == OP_OK) {
         size_t n = op_cmd_close_all(line, sizeof line);
-        st = op_device_cmd(d, line, n, NULL, 0, 1000, NULL);
+        st = op_device_cmd(d, line, n, NULL, 0, 1000, &r);
+        if (st == OP_OK && r.kind != OP_REPLY_OK) {
+            op_logf("sync: close-all answered kind %d, not aro", (int)r.kind);
+            st = OP_ERR_PROTOCOL;
+        }
     }
     if (st == OP_OK) {
         op_logf("sync: device in step after %d attempt(s)", attempt);
         return OP_OK;
     }
     if (st == OP_ERR_TIMEOUT) {
-        /* The device is present and accepting writes; it just will not
-         * answer coherently. Reporting "not connected" would send the user to
-         * check cables when the cable is fine. */
+        /* Present and accepting writes, but not answering coherently: a
+         * link problem, not a missing cable. */
         return OP_ERR_PROTOCOL;
     }
     return st;
 }
 
 /* ---- lifecycle ---------------------------------------------------------- */
-
-static void destroy_sync(op_device *d)
-{
-    pthread_mutex_destroy(&d->lock);
-    pthread_mutex_destroy(&d->cmd_lock);
-    pthread_cond_destroy(&d->reply_cv);
-    pthread_cond_destroy(&d->rx_cv);
-}
 
 op_status op_device_open(op_device *d)
 {
@@ -558,20 +496,11 @@ op_status op_device_open(op_device *d)
     atomic_store(&d->reader_stop, 0);
     d->fw_version[0] = '\0';
 
-    pthread_mutex_init(&d->lock, NULL);
-    pthread_mutex_init(&d->cmd_lock, NULL);
-    pthread_cond_init(&d->reply_cv, NULL);
-    pthread_cond_init(&d->rx_cv, NULL);
-
     st = g_factory(&d->t);
-    if (st != OP_OK) {
-        destroy_sync(d);
-        return st;
-    }
+    if (st != OP_OK) return st;
 
     if (pthread_create(&d->reader, NULL, reader_main, d) != 0) {
         op_close(&d->t);
-        destroy_sync(d);
         return OP_ERR_IO;
     }
     d->reader_started = 1;
@@ -589,14 +518,20 @@ void op_device_close(op_device *d)
 {
     if (d == NULL || !d->open) return;
 
+    /* Closed first, under the lock, so a thread waiting in op_device_pop or
+     * cmd_exchange wakes and returns instead of sleeping on a dead device. */
+    pthread_mutex_lock(&d->lock);
+    d->open = 0;
+    pthread_cond_broadcast(&d->reply_cv);
+    pthread_cond_broadcast(&d->rx_cv);
+    pthread_mutex_unlock(&d->lock);
+
     atomic_store(&d->reader_stop, 1);
     if (d->reader_started) {
         pthread_join(d->reader, NULL);
         d->reader_started = 0;
     }
     op_close(&d->t);
-    destroy_sync(d);
-    d->open = 0;
 }
 
 /* ---- command transaction ------------------------------------------------ */
@@ -611,11 +546,12 @@ static op_status cmd_exchange(op_device *d, const char *line, size_t line_len,
     struct timespec ts;
     int rc = 0;
 
-    if (d == NULL || !d->open || line == NULL || line_len == 0)
+    if (d == NULL || line == NULL || line_len == 0)
         return OP_ERR_PARAM;
     if (payload_len > 0 && payload == NULL)
         return OP_ERR_PARAM;
     if (line_len >= sizeof numbered - 16) return OP_ERR_PARAM;
+    if (!d->open) return OP_ERR_NO_DEVICE;
     if (timeout_ms == 0) timeout_ms = 1000;
 
     pthread_mutex_lock(&d->cmd_lock);
@@ -653,13 +589,15 @@ static op_status cmd_exchange(op_device *d, const char *line, size_t line_len,
 
     pthread_mutex_lock(&d->lock);
     deadline_in(&ts, timeout_ms);
-    while (!d->reply_valid && rc != ETIMEDOUT)
+    while (!d->reply_valid && d->open && rc != ETIMEDOUT)
         rc = pthread_cond_timedwait(&d->reply_cv, &d->lock, &ts);
 
     if (d->reply_valid) {
         if (reply != NULL) *reply = d->reply;
         d->reply_valid = 0;
         st = OP_OK;
+    } else if (!d->open) {
+        st = OP_ERR_NO_DEVICE;
     } else {
         op_logf("command %lu timed out after %u ms; its reply, if it comes, "
                 "will be discarded by number", (unsigned long)seq, timeout_ms);
@@ -693,19 +631,21 @@ op_status op_device_pop(op_device *d, unsigned channel, PASSTHRU_MSG *out,
     int rc = 0;
     op_status st;
 
-    if (d == NULL || !d->open || out == NULL || channel >= OP_MAX_CHANNELS)
+    if (d == NULL || out == NULL || channel >= OP_MAX_CHANNELS)
         return OP_ERR_PARAM;
 
     c = &d->ch[channel];
     pthread_mutex_lock(&d->lock);
 
-    if (c->qcount == 0 && timeout_ms > 0) {
+    if (c->qcount == 0 && d->open && timeout_ms > 0) {
         deadline_in(&ts, timeout_ms);
-        while (c->qcount == 0 && rc != ETIMEDOUT)
+        while (c->qcount == 0 && d->open && rc != ETIMEDOUT)
             rc = pthread_cond_timedwait(&d->rx_cv, &d->lock, &ts);
     }
 
-    if (c->qcount > 0) {
+    if (!d->open) {
+        st = OP_ERR_NO_DEVICE;
+    } else if (c->qcount > 0) {
         op_qhdr h;
         ring_get(c, (uint8_t *)&h, sizeof h);
         memset(out, 0, sizeof *out);
@@ -738,20 +678,24 @@ unsigned op_device_take_dropped(op_device *d, unsigned channel)
     return n;
 }
 
-void op_device_flush_channel(op_device *d, unsigned channel)
+static void flush_locked(op_channel *c)
 {
-    op_channel *c;
-    if (d == NULL || channel >= OP_MAX_CHANNELS) return;
-    c = &d->ch[channel];
-    pthread_mutex_lock(&d->lock);
     c->rq_head = c->rq_tail = c->rq_used = 0;
     c->qcount = 0;
     c->partial_active = 0;
     c->dropped = 0;
+}
+
+void op_device_flush_channel(op_device *d, unsigned channel)
+{
+    if (d == NULL || channel >= OP_MAX_CHANNELS) return;
+    pthread_mutex_lock(&d->lock);
+    flush_locked(&d->ch[channel]);
     pthread_mutex_unlock(&d->lock);
 }
 
-op_status op_device_reset_channel(op_device *d, unsigned channel)
+op_status op_device_open_channel(op_device *d, unsigned channel, uint32_t protocol,
+                                 uint32_t flags, uint32_t baud)
 {
     op_channel *c;
     uint8_t *rq;
@@ -762,14 +706,24 @@ op_status op_device_reset_channel(op_device *d, unsigned channel)
     rq = c->rq != NULL ? c->rq : malloc(OP_RXQ_BYTES);
     memset(c, 0, sizeof *c);
     c->rq = rq;
+    if (rq != NULL) {
+        c->open     = 1;
+        c->protocol = protocol;
+        c->flags    = flags;
+        c->baud     = baud;
+    }
     pthread_mutex_unlock(&d->lock);
     return rq != NULL ? OP_OK : OP_ERR_IO;
 }
 
-void op_device_quiet_tx(op_device *d, unsigned channel, int on)
+void op_device_close_channel(op_device *d, unsigned channel)
 {
+    op_channel *c;
     if (d == NULL || channel >= OP_MAX_CHANNELS) return;
+    c = &d->ch[channel];
     pthread_mutex_lock(&d->lock);
-    d->ch[channel].quiet_tx = on;
+    c->open = 0;
+    c->nperiodic = 0;
+    flush_locked(c);
     pthread_mutex_unlock(&d->lock);
 }

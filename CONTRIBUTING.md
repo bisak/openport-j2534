@@ -14,7 +14,7 @@ clean, and any behaviour that was measured on a cable or a vehicle is written do
 
 ## What helps most
 
-**Live-bus data.** Most open questions in `docs/PROTOCOL.md` §10 need a vehicle the driver has not
+**Live-bus data.** Most open questions in `docs/PROTOCOL.md` §12 need a vehicle the driver has not
 seen, particularly one that answers on K-line. `tools/car/car-session.sh` runs a read-only session
 and archives everything; `docs/CAR-SESSION.md` explains what it asks and why each request is safe.
 Open an issue with the session directory attached.

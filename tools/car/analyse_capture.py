@@ -3,7 +3,7 @@
 analyse_capture — turn a car-session capture into verdicts.
 
 Reads the text produced by car_capture.py and answers the open questions from
-docs/PROTOCOL.md section 10 directly, so the session's value does not depend on
+docs/PROTOCOL.md section 12 directly, so the session's value does not depend on
 anyone squinting at hex afterwards.
 
   python3 tools/car/analyse_capture.py car-session-*/4-protocol-capture.txt
@@ -329,22 +329,6 @@ def q_pins(sections):
                              "connected vehicle; treat scaling as unconfirmed.")
 
 
-def q_periodic(sections):
-    s = sections.get("Q4")
-    if not s:
-        return
-    accepted = [l for l in s["lines"] if "ACCEPTED" in l]
-    rejects = [l for l in s["lines"] if "interval=" in l]
-    print(f"\nPeriodic message interval encoding\n  {len(rejects)} value(s) tried")
-    for l in rejects[:12]:
-        print("   " + l.strip())
-    verdict("  VERDICT",
-            "an interval was accepted — measure the frame spacing above to get "
-            "the unit" if accepted else
-            "every interval was rejected; the host-side scheduler stays the "
-            "right implementation.")
-
-
 def q_unknown(sections):
     for key, label in (("Q5", "atm / atw / atx / aty"),
                        ("Q6", "two-digit protocol numbers")):
@@ -381,10 +365,9 @@ def main():
     q_config(sections)
     q_received(sections)
     q_pins(sections)
-    q_periodic(sections)
     q_unknown(sections)
 
-    print("\nNext: fold confirmed answers into docs/PROTOCOL.md section 10 and "
+    print("\nNext: fold confirmed answers into docs/PROTOCOL.md section 12 and "
           "replace the simulator's MODELLED behaviours with measured ones.")
     return 0
 

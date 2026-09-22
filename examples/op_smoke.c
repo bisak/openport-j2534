@@ -99,9 +99,9 @@ int main(int argc, char **argv)
     rc = PassThruIoctl(ch, CLEAR_RX_BUFFER, NULL, NULL);
     report("Ioctl CLEAR_RX_BUFFER", rc, STATUS_NOERROR);
 
-    /* Refused unless the caller opted in. Nothing reaches the pin. */
-    rc = PassThruSetProgrammingVoltage(dev, 12, 17000);
-    report("SetProgrammingVoltage (gated)", rc, ERR_NOT_SUPPORTED);
+    /* Bench-safe: switching a pin off never energises anything. */
+    rc = PassThruSetProgrammingVoltage(dev, 12, VOLTAGE_OFF);
+    report("SetProgrammingVoltage VOLTAGE_OFF", rc, STATUS_NOERROR);
 
     rc = PassThruIoctl(ch, 0xDEAD, NULL, NULL);
     report("Ioctl bad id -> ERR_INVALID_IOCTL_ID", rc, ERR_INVALID_IOCTL_ID);

@@ -166,7 +166,7 @@ typedef unsigned long J_U32;
  * official driver installer). Documented here so callers written against
  * the vendor DLL find the same names; only the ones marked implemented are
  * honoured by this driver. --------------------------------------------- */
-#define SNIFF_MODE                  0x10000000UL /* Connect flag: listen without ACK. Refused: the firmware accepts it and still acknowledges */
+#define SNIFF_MODE                  0x10000000UL /* Connect flag: listen without ACK. Passed through; firmware 1.17.4877 accepts it and still acknowledges */
 /* J2534-2 channel ids. Tactrix's DLL opens them on these firmware channels. */
 #define CAN_CH1                     0x00009000UL /* firmware 5, same as CAN */
 #define ISO9141_CH1                 0x00009240UL /* firmware 3, K line, same as ISO9141 */
@@ -183,7 +183,7 @@ typedef unsigned long J_U32;
 #define TX_PARAM_STOP_BITS          0x9000UL     /* GET/SET_CONFIG: serial stop bits, 1 by default (passed through) */
 #define ISO15765_EXT_ADDR           0x00000080UL /* RxStatus alias of ISO15765_ADDR_TYPE */
 #define VOLTAGE_OFF                 0xFFFFFFFFUL /* SetProgrammingVoltage: pin off (implemented) */
-#define SHORT_TO_GROUND             0xFFFFFFFEUL /* SetProgrammingVoltage: pin to ground (gated like a voltage; refused on K under a K-line channel, L under an L-line one) */
+#define SHORT_TO_GROUND             0xFFFFFFFEUL /* SetProgrammingVoltage: pin to ground (refused on K under a K-line channel, L under an L-line one) */
 #define PIN_VADJ                    17UL         /* adjustable output supply, not a J1962 pin; READ_PROG_VOLTAGE with pInput -> 17 */
 #define CAN_MIXED_FORMAT            0x8000UL     /* SET_CONFIG: 0 off, 1 on, 2 all frames (passed through) */
 #define ERR_OEM_VOLTAGE_TOO_HIGH    0x77UL       /* device error for SetProgrammingVoltage: above 20000 mV */

@@ -68,8 +68,8 @@ Not promises — checks in `tools/car/car_capture.py` that run every time.
 3. **Read-only services only.** `$3E` TesterPresent, `$01`/`$09` legislated OBD
    modes, `$22` ReadDataByIdentifier. No write services, no session changes, no
    security access, no routine control.
-4. **No programming voltage.** `atv` is never sent. The driver gates it behind
-   an environment variable that the script does not set.
+4. **No programming voltage.** The script never sends `atv` and never calls
+   `PassThruSetProgrammingVoltage`.
 5. **Periodic messages are always stopped**, in a `finally`, with a channel
    close as a backstop — so nothing keeps transmitting after we unplug.
 6. **A read-only service whitelist**, enforced by `guard_service()` on both CAN
@@ -90,18 +90,16 @@ Not promises — checks in `tools/car/car_capture.py` that run every time.
    VCDS and the Galletto use. Only StartCommunication and whitelisted reads
    follow; the init command form is the one Tactrix's own DLL uses
    (`PROTOCOL.md` §4). The previous form would have desynchronised the cable.
-8. **Verbs of unknown meaning are bench-only.** Q5 (`atm`/`atw`/`atx`) no
-   longer runs on a vehicle unless `--unknown-verbs` is passed: "read-only"
-   cannot be claimed for a command nobody understands.
-9. **The periodic-interval sweep cannot flood the bus.** It runs largest
-   interval first, stops listening after 12 echo frames, and ends as soon as
-   two accepted values have fixed the unit.
-10. **Ctrl-C leaves the cable silent.** Any exit path stops periodic messages,
-    closes every channel and resets the cable.
-11. **Every exchange is recorded raw.** Each command's bytes, payload, latency
+8. **Verbs of unknown meaning are bench-only.** Q5 (`atx`, and the bare
+   forms of `atm` and `atw`) does not run on a vehicle unless
+   `--unknown-verbs` is passed: "read-only" cannot be claimed for a command
+   nobody understands.
+9. **Ctrl-C leaves the cable silent.** Any exit path stops periodic messages,
+   closes every channel and resets the cable.
+10. **Every exchange is recorded raw.** Each command's bytes, payload, latency
     to the first reply byte and the complete reply hex go into the capture as
     `RAW` lines, so a wrong interpretation at the car costs nothing.
-12. **The whole script has been rehearsed** end-to-end against the simulator,
+11. **The whole script has been rehearsed** end-to-end against the simulator,
     including the K-line variants and the live-mode requests, so the session
     is not also a debugging session.
 
@@ -149,7 +147,7 @@ python3 tools/car/analyse_capture.py live-*.txt
 K-line init variants: `five33`, `fast33` (EOBD address 0x33), `five01`,
 `fast01` (VAG engine address 0x01). Sections: q7 pins, q0 EOBD, q1 framing,
 q2 K-line, q3 transmit arguments, q8 silent bus, q9 echo, q10 raw CAN listen,
-q11 config read-back, q4 periodic, q6 protocol numbers; q5 (unknown verbs) and
+q11 config read-back, q6 protocol numbers; q5 (unknown verbs) and
 `--long-read` are bench-only and off.
 
 Verdicts that decide driver code: K-line layout → `op_frame_has_timestamp()`;
@@ -204,8 +202,7 @@ leaves the most valuable data captured.
 | Which configuration ids the firmware knows, and their defaults, on CAN and K-line | `q11` |
 | The driver's own K-line path end to end (init ioctl, write, read) | `car-session.sh` step 7, `examples/op_kline` |
 | **The EDC16 flash counters**, a value the owner already knows | `--tp20` (VAG needs TP2.0, not ISO15765); `--allow-diag-session` if the ECU wants `10 89` first |
-| `atp` interval encoding | `q4` |
-| `atm` / `atw` / `atx` | `q5` (bench only, `--unknown-verbs`) |
+| `atx` (`atm` and `atw` are known: periodic message and five-baud init) | `q5` (bench only, `--unknown-verbs`) |
 | Two-digit protocol numbers, and the DLL's five-argument `ato` | `q6` |
 | Pin 16 reads battery voltage | `q7` |
 | How the firmware reports a silent bus | `q8` |
@@ -296,7 +293,7 @@ python3 tools/car/car_capture.py --tp20 --allow-diag-session --out tp20-session.
 
 ## Afterwards
 
-Send back the session directory. `PROTOCOL.md` §10 gets folded down, the
+Send back the session directory. `PROTOCOL.md` §12 gets folded down, the
 simulator's `MODELLED` behaviours get replaced with measured ones, and the
 captured frames become golden-trace regression fixtures — so the session's value
 persists rather than expiring with it.

@@ -61,6 +61,7 @@ static int       g_fail_writes;
 static op_status g_fail_write_st;
 static int       g_fail_reads;
 static op_status g_fail_read_st;
+static unsigned  g_next_periodic;
 
 void mock_reset(void)
 {
@@ -70,6 +71,7 @@ void mock_reset(void)
     g_responder = NULL;
     g_tx_delay_ms = 0;
     g_fail_writes = g_fail_reads = 0;
+    g_next_periodic = 0;
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -153,6 +155,11 @@ static size_t declared_payload(const char *line, size_t len)
         /* aty<ch> <len> 0: <len> StartCommunication request bytes follow. */
         if (sscanf(buf + 3, "%u %u %u", &a, &b, &c) == 3) return b;
     }
+    if (copy > 3 && buf[0] == 'a' && buf[1] == 't' && buf[2] == 'm') {
+        /* atm<ch> <interval_us> 0 <txflags> <len>: <len> payload bytes follow. */
+        unsigned plen = 0;
+        if (sscanf(buf + 3, "%u %u %u %u %u", &a, &b, &c, &n, &plen) == 5) return plen;
+    }
     if (copy > 3 && buf[0] == 'a' && buf[1] == 't' && buf[2] == 'f') {
         unsigned type = 0, each = 0;
         if (sscanf(buf + 3, "%u %u %u %u", &a, &type, &b, &each) == 4) {
@@ -188,6 +195,7 @@ static void feed_locked(const uint8_t *buf, size_t len)
             size_t want;
             /* strip a trailing CR */
             if (g_line_len > 0 && g_line[g_line_len - 1] == '\r') g_line_len--;
+            if (g_line_len == 0) continue;      /* an empty line gets silence, as on the cable */
             want = declared_payload((const char *)g_line, g_line_len);
             if (want > 0) {
                 g_await_payload = want;
@@ -348,6 +356,16 @@ static void openport_responder(const char *line, size_t len,
         if (d) usleep(d * 1000u);
         mock_push_reply("aro");
     } else if (strncmp(buf, "atv", 3) == 0) {
+        mock_push_reply("aro");
+    } else if (strncmp(buf, "atm", 3) == 0) {
+        /* Periodic message installed: `arm<ch> <id>`, ids counting up from 0
+         * as the cable hands them out (PROTOCOL.md section 10). */
+        char r[32];
+        if (sscanf(buf + 3, "%u", &ch) == 1) {
+            snprintf(r, sizeof r, "arm%u %u", ch, g_next_periodic++);
+            mock_push_reply(r);
+        }
+    } else if (strncmp(buf, "atn", 3) == 0) {
         mock_push_reply("aro");
     } else {
         mock_push_reply("are 7");

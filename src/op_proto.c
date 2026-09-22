@@ -430,6 +430,20 @@ size_t op_cmd_stop_filter(char *out, size_t out_sz, unsigned ch, uint32_t filter
     return emit(out, out_sz, "atk%u %lu\r\n", ch, (unsigned long)filter_id);
 }
 
+size_t op_cmd_periodic_start(char *out, size_t out_sz, unsigned ch,
+                             uint32_t interval_us, uint32_t txflags,
+                             size_t payload_len)
+{
+    if (payload_len == 0 || payload_len > OP_MSG_MAX) return 0;
+    return emit(out, out_sz, "atm%u %lu 0 %lu %zu\r\n", ch,
+                (unsigned long)interval_us, (unsigned long)txflags, payload_len);
+}
+
+size_t op_cmd_periodic_stop(char *out, size_t out_sz, unsigned ch, uint32_t msg_id)
+{
+    return emit(out, out_sz, "atn%u %lu\r\n", ch, (unsigned long)msg_id);
+}
+
 size_t op_cmd_fast_init(char *out, size_t out_sz, unsigned ch, size_t payload_len)
 {
     /* A fast init with no request bytes is legal: J2534 defines a NULL input

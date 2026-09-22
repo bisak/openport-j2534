@@ -47,7 +47,7 @@ make sanitize-thread # TSAN
 This is not box-ticking. TSAN found **three data races that 438 passing unit
 tests did not**, all from using `volatile` where an atomic was required:
 `volatile` constrains the compiler but says nothing about inter-thread memory
-ordering. The driver has a reader thread and a periodic scheduler thread, so
+ordering. The driver has a reader thread beside the application's own, so
 this class of bug is live and invisible to functional testing.
 
 ## 2. Fuzzing
@@ -76,7 +76,7 @@ that does not run.
 ## 3. Unit tests
 
 ```bash
-make test            # 438 checks, no cable
+make test            # unit tests and golden traces, no cable
 ```
 
 A mock transport is injected through `op_device_set_factory`, so everything
@@ -85,7 +85,7 @@ above the byte pipe is the real code.
 ## 4. The protocol simulator — the centrepiece
 
 ```bash
-make sim             # 50 scenario checks, no cable
+make sim             # scenario checks, no cable
 python3 tests/sim/run_scenarios.py s_multiframe   # one scenario
 python3 tests/sim/openport_sim.py --verbose       # standalone, prints its pty
 ```

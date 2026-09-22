@@ -27,9 +27,11 @@
  * DLL held 1,460 CAN frames left unread for 29 s without a loss (measured
  * 2026-09-16); a 64-message queue lost 1,438 of them. */
 #define OP_RXQ_BYTES      (1024u * 1024u)
-#define OP_MAX_FILTERS    16
 #define OP_ACCUM_CAP      (OP_MSG_MAX + OP_FRAME_MAX)
 #define OP_VERSION_MAX    64
+/* J2534-1 requires at least ten periodic messages per channel; the firmware
+ * holds ten (measured 2026-09-16). */
+#define OP_PERIODIC_PER_CH 10
 
 typedef struct {
     int          open;
@@ -46,17 +48,16 @@ typedef struct {
     unsigned     dropped;        /* queue overruns since last read */
 
     uint32_t     filters;        /* bitmask of live filter ids */
-    /* Set around a host-scheduled periodic transmit: the device's transmit
-     * indication for it is dropped, as the firmware's own periodic facility
-     * (which the vendor DLL uses) produces none. An application must not see
-     * a stream of indications it never asked for. */
-    int          quiet_tx;
+    uint32_t     periodic[OP_PERIODIC_PER_CH]; /* live firmware periodic ids */
+    unsigned     nperiodic;
 } op_channel;
 
 typedef struct {
     op_transport    t;
-    int             open;
+    int             open;        /* written under lock; waiters re-check it */
 
+    /* Statically initialised and never destroyed: a thread may be waiting on
+     * them when the device closes. */
     pthread_mutex_t lock;
     pthread_cond_t  reply_cv;
     pthread_cond_t  rx_cv;
@@ -137,18 +138,19 @@ op_status op_device_cmd(op_device *d, const char *line, size_t line_len,
 op_status op_device_send_nowait(op_device *d, const char *line, size_t line_len,
                                 const uint8_t *payload, size_t payload_len);
 
-/* Mark a channel's next transmit as a periodic one (see op_channel.quiet_tx). */
-void op_device_quiet_tx(op_device *d, unsigned channel, int on);
-
-/* Pop one message from a channel's queue. OP_ERR_TIMEOUT when none arrives. */
+/* Pop one message from a channel's queue. OP_ERR_TIMEOUT when none arrives,
+ * OP_ERR_NO_DEVICE when the device is closed, including by another thread
+ * while this call was waiting. */
 op_status op_device_pop(op_device *d, unsigned channel, PASSTHRU_MSG *out,
                         unsigned timeout_ms);
 
 void op_device_flush_channel(op_device *d, unsigned channel);
 
-/* Make a channel fresh for a new connection. Allocates its receive queue on
- * first use; OP_ERR_IO when that allocation fails. */
-op_status op_device_reset_channel(op_device *d, unsigned channel);
+/* Mark a channel open for a new connection, with an empty queue. Allocates
+ * the queue on first use; OP_ERR_IO when that allocation fails. */
+op_status op_device_open_channel(op_device *d, unsigned channel, uint32_t protocol,
+                                 uint32_t flags, uint32_t baud);
+void      op_device_close_channel(op_device *d, unsigned channel);
 
 /* Number of messages the channel's queue has dropped since this was last
  * called, and reset. Reported to the caller so an overrun is never silent. */

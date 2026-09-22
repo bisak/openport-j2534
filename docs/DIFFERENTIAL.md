@@ -159,8 +159,8 @@ Each is a deliberate decision to be correct rather than bug-compatible.
 | # | Divergence | Why |
 |---|---|---|
 | 1 | Stubs return `ERR_NOT_SUPPORTED`, never `STATUS_NOERROR` | A caller using `StartPeriodicMsg` for a TesterPresent keep-alive otherwise gets silence and believes it is transmitting |
-| 2 | `StartPeriodicMsg`/`StopPeriodicMsg` are implemented | The capability is real; host-scheduled because the firmware's `atp` interval encoding is not pinned down |
-| 3 | `SetProgrammingVoltage` implemented, gated by `OPENPORT_ENABLE_PROG_VOLTAGE=1` | It works (`atv`), but it energises a pin. `VOLTAGE_OFF` is always allowed |
+| 2 | `StartPeriodicMsg`/`StopPeriodicMsg` are implemented | In the firmware (`atm`/`atn`), the commands the vendor DLL sends |
+| 3 | `SetProgrammingVoltage` implemented | `atv`, as the vendor sends it; one pin at a time, as J2534-1 §7.2.11 requires |
 | 4 | `ReadMsgs` does **not** double a timeout below 100 ms | The old driver silently doubled the caller's timeout for K-line. That breaks the API contract. A K-line caller should pass the timeout it needs |
 | 5 | Every libusb call is checked and every timeout bounded | 19 of 26 transfers in the old driver ignore the return code; 20 of 26 use timeout 0 |
 | 6 | `GetLastError` returns real text | It returned an empty string |
@@ -185,26 +185,20 @@ caller cannot recover.
 
 | Point | Decision | Why |
 |---|---|---|
-| A TxDone indication carries the CAN id on the wire; J2534 Table 13 says `DataLength` shall be zero. The vendor DLL reports the 4-byte id (measured on a live bus 2026-09-13, `RxStatus 0x9, DataSize 4`) | **Conform** — report no data | No vendor sample reads the field, and this driver serialises commands, so only one transmit is ever in flight and the id adds no correlation the caller does not already have. On the 04.04 API there is no `MsgHandle` to correlate with, which was the argument for keeping it, but with one transmit outstanding there is nothing to disambiguate. The id is still logged |
+| A TxDone indication carries the CAN id on the wire. J2534-1 DEC2004 §8.6 says DataSize 4 (or 5) with the CAN id of the message just sent, and the vendor DLL reports exactly that (measured on a live bus 2026-09-13, `RxStatus 0x9, DataSize 4`) | **Report the id** | An earlier revision reported no data, citing the JAN2022 revision. The driver reports API 04.04, whose text and the vendor agree |
 | A full receive queue: discard the oldest message or the newest? | **Conform** — discard the arriving one | Also the safer answer. A caller that ignores the overflow return then gets a truncated but contiguous sequence, instead of one with an unmarked hole in the middle. The previous reasoning, that a stale message is less useful than a fresh one, is true of a live gauge and wrong for a diagnostic exchange where order is the point |
 | Per-protocol message size limits | **Enforce the certain ones only** | The minima, and the maxima that follow from the wire format. ISO14230's maximum depends on connect flags this driver does not track, so it is left to the device — wrongly rejecting a valid message would be worse |
 
-### A limitation that cannot be fixed yet
+### Two ECUs answering at once
 
-ISO15765 reassembly keeps one context per channel. If two or more ECUs answer
-a functional request and **both** replies exceed one wire frame, their
+ISO15765 reassembly keeps one context per channel. If two ECUs answer a
+functional request and **both** replies exceed one wire frame, their
 continuation frames interleave and would be concatenated into each other.
 
-This cannot be fixed correctly until the chunking model is measured
-(`PROTOCOL.md` §10): routing a continuation frame to the right message needs a
-CAN id inside that frame, and whether one is there is exactly the open
-question. Detection is no better — a frame whose leading bytes differ from the
-message in progress is either another ECU's frame or ordinary payload, and
-under one model there is no way to tell which. Shipping a heuristic that
-silently drops real data on a false positive would be worse than the gap.
-
-Not reachable through the legislated OBD services: every reply measured on a
-vehicle was far short of 250 bytes, and only one ECU answered.
+Every continuation chunk carries the CAN id (the vendor DLL reassembles only
+that layout, `AB-OFFICIAL.md`), so routing chunks by id is possible. It is
+not done: no legislated OBD reply approaches 250 bytes, only one ECU has ever
+answered in a measured session, and the vendor DLL keeps one context too.
 
 ## A bug this harness found in the new driver
 
@@ -217,9 +211,10 @@ periodic message used a 200 ms deadline, but a CAN transmit with no bus takes
 ~1.2 s to be rejected. The write gave up; the device's late `are 9` was then
 collected by the *next* command, which reported it as its own failure.
 
-That is the §9.2 hazard occurring inside the new driver. Fixed two ways: a
-reply is only accepted when a command is actually waiting for one, and the
-periodic deadline now exceeds the worst-case transmit rejection.
+That is the §9.2 hazard occurring inside the new driver. Fixed by accepting a
+reply only when a command is waiting for one, and since then by matching
+every reply to its command by sequence number. The host scheduler itself is
+gone: periodic messages run in the firmware.
 `late_reply_is_not_reused()` in `tests/unit/test_j2534.c` is the regression.
 
 ## What has not been tested
@@ -239,27 +234,20 @@ return different codes for the same call, 2026-09-13, build 1.02.0.4868:
 
 | Call | Vendor | This driver | Standard (J2534-1 JAN2022) |
 |---|---|---|---|
-| `PassThruDisconnect` on a channel that was never opened, before `Open` | `ERR_INVALID_CHANNEL_ID` | `ERR_DEVICE_NOT_CONNECTED` | either is defensible; the device is not open |
+| `PassThruDisconnect` on a channel that was never opened, before `Open` | `ERR_INVALID_CHANNEL_ID` | `ERR_INVALID_DEVICE_ID` | `ERR_INVALID_DEVICE_ID`: §7.2.1, any call before a successful Open |
 | `PassThruIoctl` given a device id where a channel id is expected | `ERR_INVALID_CHANNEL_ID` | `ERR_INVALID_IOCTL_ID` | `ERR_INVALID_CHANNEL_ID` reads closer to the text |
 | `PassThruStartMsgFilter` with a NULL mask | `ERR_FAILED` | `ERR_NULL_PARAMETER` | `ERR_NULL_PARAMETER` |
-| `PassThruClose` twice | `ERR_INVALID_DEVICE_ID` | `ERR_DEVICE_NOT_CONNECTED` | `ERR_INVALID_DEVICE_ID` |
 | `PassThruWriteMsgs` with `Timeout=0` on a bus with no ACK peer (cable, bench) | `STATUS_NOERROR`, 1 sent; the frame is queued unnumbered and not waited for | `ERR_TIMEOUT`, 0 sent | queue and return immediately: the vendor |
 | `PassThruIoctl(CLEAR_RX_BUFFER)` | clears the DLL's queue, nothing on the wire | used to also send `atl` to the device | either; now the same as the vendor |
 | `PassThruWriteMsgs` transmit budget | sends the Timeout to the firmware (`att … <timeout_us>`) | used to send none, leaving the firmware's ~1 s default even for a 5 s write | the vendor; now the same |
 | `PassThruIoctl(FIVE_BAUD_INIT, 0x33)` | `atw3 51` | used to send `atw3 1` + a raw 0x33 byte, initialising address 1 | the vendor; now the same |
-| Periodic message running (live bus, 100 ms) | no transmit-done indications reach the application (the firmware's `atm` produces none) | used to queue one `TX_DONE` indication per period, ten a second | the vendor; now the same |
+| Periodic message running (live bus, 100 ms) | `atm`: scheduled by the firmware, no transmit-done indications | used to schedule on the host with `att`; now `atm` | the vendor; now the same |
 
-The stale-id and zero-timeout rows were fixed the same day: `PassThruClose`
-on a stale id now returns `ERR_INVALID_DEVICE_ID`, and a zero-timeout write
-is sent numbered and not waited for, so its late reply is recognised and
-dropped rather than mistaken for the next command's answer. The NULL case is
-already the standard's; the first two rows stay as they are. Every other return code in the sequence agrees,
-including the timeout, filter, message-id and channel-in-use cases.
-
-The vendor DLL's `PassThruStartPeriodicMsg` is implemented in the firmware
-(`atm`, `PROTOCOL.md` §4, measured on the cable the same day); this driver
-schedules periodic messages on the host because the verb it had tried,
-`atp`, is rejected. Both work; moving to `atm` is a follow-up.
+Where the two still differ, the driver follows the standard's text: any call
+before a successful `PassThruOpen` returns `ERR_INVALID_DEVICE_ID` (§7.2.1),
+a NULL message pointer returns `ERR_NULL_PARAMETER`, and an unknown ioctl id
+returns `ERR_INVALID_IOCTL_ID`. Every other return code in the sequence
+agrees, including the timeout, filter, message-id and channel-in-use cases.
 
 ## Real-world validation: drop-in replacement
 

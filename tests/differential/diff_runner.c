@@ -201,7 +201,7 @@ int main(int argc, char **argv)
         printf("      msgid=%lu\n", (unsigned long)msgid);
         step("StopPeriodicMsg", api.stopp(ch, msgid));
     }
-    step("SetProgrammingVoltage 12 @ 17000 mV", api.progv(dev, 12, 17000));
+    step("SetProgrammingVoltage 12 VOLTAGE_OFF", api.progv(dev, 12, VOLTAGE_OFF));
 
     /* --- error paths ---------------------------------------------------- */
     step("Connect twice (same protocol)", api.connect(dev, ISO15765, 0, 500000, &v));

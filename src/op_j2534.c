@@ -16,23 +16,15 @@
 #include "op_log.h"
 #include "op_proto.h"
 
-#include <pthread.h>
-#include <limits.h>
 #include <stdarg.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
-#include <unistd.h>
 
 #define OP_DEVICE_ID        1UL
 #define OP_DEFAULT_CMD_MS   1000u
-/* J2534-1 requires at least ten periodic messages per channel, and the
- * firmware's own facility holds ten (measured 2026-09-16). */
-#define OP_PERIODIC_PER_CH  10
-#define OP_MAX_PERIODIC     (OP_PERIODIC_PER_CH * OP_MAX_CHANNELS)
 
 #define OP_API_VERSION      "04.04"
 #define OP_DLL_VERSION      "openport-j2534 " OPENPORT_VERSION
@@ -181,161 +173,19 @@ static op_channel *channel_of(op_device *d, J_U32 id)
     return &d->ch[id];
 }
 
-/* ---- periodic messages --------------------------------------------------
- * Driven from the host. The firmware has a working periodic facility
- * (`atm`/`atn`, PROTOCOL.md section 4, measured 2026-09-13), but a keep-alive
- * that silently stops is exactly the failure this driver exists to avoid, so
- * they are scheduled here, where the behaviour is ours to guarantee. Moving
- * to `atm` is a choice, not a necessity.
- */
-typedef struct {
-    int          used;
-    J_U32        channel;
-    J_U32        interval_ms;
-    PASSTHRU_MSG msg;
-    struct timeval next;
-    unsigned     missed;      /* periods skipped to avoid a catch-up burst */
-    int          in_flight;   /* a transmit for this slot is on the wire now */
-} op_periodic;
-
-static op_periodic     g_periodic[OP_MAX_PERIODIC];
-static pthread_mutex_t g_periodic_lock = PTHREAD_MUTEX_INITIALIZER;
-/* Signalled when a periodic transmit finishes, so a stop can wait one out. */
-static pthread_cond_t  g_periodic_idle = PTHREAD_COND_INITIALIZER;
-static pthread_t       g_periodic_thread;
-static int             g_periodic_running;
-static atomic_int      g_periodic_stop;
-
-static long write_one(op_device *d, J_U32 channel, const PASSTHRU_MSG *m,
-                      unsigned timeout_ms);
-
-static void tv_add_ms(struct timeval *tv, J_U32 ms)
+/* Stop one firmware periodic message and forget it. The firmware keeps them
+ * across a crashed host (PROTOCOL.md section 10), which is why open and close
+ * both reset the device. */
+static long periodic_stop(op_device *d, op_channel *c, J_U32 channel, unsigned slot)
 {
-    tv->tv_sec  += (time_t)(ms / 1000u);
-    tv->tv_usec += (suseconds_t)((ms % 1000u) * 1000u);
-    if (tv->tv_usec >= 1000000) { tv->tv_sec++; tv->tv_usec -= 1000000; }
-}
+    char line[OP_CMD_MAX];
+    size_t n = op_cmd_periodic_stop(line, sizeof line, (unsigned)channel, c->periodic[slot]);
+    long rc = simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
 
-static void *periodic_main(void *arg)
-{
-    op_device *d = (op_device *)arg;
-
-    while (!atomic_load(&g_periodic_stop)) {
-        struct timeval now;
-        int i;
-
-        gettimeofday(&now, NULL);
-
-        pthread_mutex_lock(&g_periodic_lock);
-        for (i = 0; i < OP_MAX_PERIODIC; i++) {
-            op_periodic *p = &g_periodic[i];
-            PASSTHRU_MSG copy;
-            J_U32 ch;
-
-            if (!p->used) continue;
-            if (now.tv_sec < p->next.tv_sec ||
-                (now.tv_sec == p->next.tv_sec && now.tv_usec < p->next.tv_usec))
-                continue;
-
-            copy = p->msg;
-            ch   = p->channel;
-            p->in_flight = 1;
-
-            /*
-             * Advance from the previous deadline, not from now, so a period is
-             * the interval the caller asked for rather than the interval plus
-             * however long the transmit took.
-             *
-             * If that puts the next deadline already in the past — a transmit
-             * blocked for over a second, say — resynchronise instead of firing
-             * a burst to catch up. A clump of frames put on a vehicle bus to
-             * make up for lost time is worse than a skipped keep-alive.
-             */
-            tv_add_ms(&p->next, p->interval_ms);
-            if (p->next.tv_sec < now.tv_sec ||
-                (p->next.tv_sec == now.tv_sec && p->next.tv_usec < now.tv_usec)) {
-                p->next = now;
-                tv_add_ms(&p->next, p->interval_ms);
-                if (p->missed < UINT_MAX) p->missed++;
-            }
-            pthread_mutex_unlock(&g_periodic_lock);
-
-            /* Outside the periodic lock: write_one takes the device command
-             * lock, and holding both would invert the order taken by
-             * StopPeriodicMsg. */
-            /* A CAN transmit that gets no bus acknowledgement takes over a
-             * second to be rejected, so a short deadline here would time out
-             * every time and generate a stream of orphan replies. */
-            /* The device answers a transmit with its indication frame before
-             * the acknowledgement, so the window around the command covers it. */
-            op_device_quiet_tx(d, (unsigned)ch, 1);
-            (void)write_one(d, ch, &copy, OP_DEFAULT_CMD_MS + 500u);
-            op_device_quiet_tx(d, (unsigned)ch, 0);
-
-            pthread_mutex_lock(&g_periodic_lock);
-            p->in_flight = 0;
-            pthread_cond_broadcast(&g_periodic_idle);
-            /* One transmit per pass. Several periodics coming due together
-             * would otherwise go out back-to-back with no spacing at all. */
-            break;
-        }
-        pthread_mutex_unlock(&g_periodic_lock);
-
-        usleep(2000);
-    }
-    return NULL;
-}
-
-/* Decided under the lock: two concurrent StartPeriodicMsg calls must not each
- * see g_periodic_running == 0 and start a second scheduler thread. The new
- * thread blocks on this same lock until we release it, which is harmless. */
-static int periodic_start_thread(op_device *d)
-{
-    int ok = 1;
-    pthread_mutex_lock(&g_periodic_lock);
-    if (!g_periodic_running) {
-        atomic_store(&g_periodic_stop, 0);
-        if (pthread_create(&g_periodic_thread, NULL, periodic_main, d) == 0)
-            g_periodic_running = 1;
-        else
-            ok = 0;
-    }
-    pthread_mutex_unlock(&g_periodic_lock);
-    return ok;
-}
-
-static void periodic_stop_all(void)
-{
-    pthread_t thread;
-    int running;
-    int i;
-
-    pthread_mutex_lock(&g_periodic_lock);
-    for (i = 0; i < OP_MAX_PERIODIC; i++) g_periodic[i].used = 0;
-    running = g_periodic_running;
-    thread  = g_periodic_thread;
-    g_periodic_running = 0;
-    atomic_store(&g_periodic_stop, 1);
-    pthread_mutex_unlock(&g_periodic_lock);
-
-    /* Joined outside the lock: the scheduler thread takes it on every pass,
-     * so joining while holding it would deadlock. */
-    if (running) pthread_join(thread, NULL);
-}
-
-static void periodic_drop_channel(J_U32 channel)
-{
-    int i;
-    pthread_mutex_lock(&g_periodic_lock);
-    for (i = 0; i < OP_MAX_PERIODIC; i++)
-        if (g_periodic[i].used && g_periodic[i].channel == channel)
-            g_periodic[i].used = 0;
-    /* Same reasoning as StopPeriodicMsg: do not report the channel quiet while
-     * one of its frames is still on the wire. */
-    for (i = 0; i < OP_MAX_PERIODIC; i++)
-        while (g_periodic[i].in_flight && g_periodic[i].channel == channel)
-            pthread_cond_wait(&g_periodic_idle, &g_periodic_lock);
-    pthread_mutex_unlock(&g_periodic_lock);
+    /* Gone either way: the device stopped it, or says it no longer exists. */
+    if (rc == STATUS_NOERROR || rc == ERR_INVALID_MSG_ID)
+        c->periodic[slot] = c->periodic[--c->nperiodic];
+    return rc;
 }
 
 /* ---- 1. PassThruOpen ---------------------------------------------------- */
@@ -429,8 +279,8 @@ long PassThruClose(J_U32 DeviceID)
     if (!d->open || DeviceID != OP_DEVICE_ID)
         return fail(ERR_INVALID_DEVICE_ID, "PassThruClose");
 
-    periodic_stop_all();
-
+    /* atz stops every periodic message, closes every channel and releases
+     * every pin (measured, PROTOCOL.md sections 8 and 10). */
     n = op_cmd_reset(line, sizeof line);
     (void)simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
 
@@ -452,8 +302,7 @@ long PassThruConnect(J_U32 DeviceID, J_U32 ProtocolID, J_U32 Flags,
 
     op_err_clear();
     rec_line("connect %lu %lu %lu %lu", (unsigned long)DeviceID, (unsigned long)ProtocolID, (unsigned long)Flags, (unsigned long)BaudRate);
-    if (!d->open) return fail(ERR_DEVICE_NOT_CONNECTED, "PassThruConnect");
-    if (DeviceID != OP_DEVICE_ID)
+    if (!d->open || DeviceID != OP_DEVICE_ID)
         return fail(ERR_INVALID_DEVICE_ID, "PassThruConnect");
     if (pChannelID == NULL)
         return fail(ERR_NULL_PARAMETER, "PassThruConnect(pChannelID)");
@@ -462,17 +311,9 @@ long PassThruConnect(J_U32 DeviceID, J_U32 ProtocolID, J_U32 Flags,
         return fail(ERR_INVALID_PROTOCOL_ID, "PassThruConnect");
     if (d->ch[fw].open)
         return fail(ERR_CHANNEL_IN_USE, "PassThruConnect");
-    /* Firmware 1.17.4877 accepts SNIFF_MODE and ignores it: on a sniffing
-     * channel, alone with a bench ECU, a transmit still went out and was
-     * acknowledged, which a listen-only controller cannot do; the same held
-     * with Tactrix's own logger flags, SNIFF_MODE | CAN_ID_BOTH, on a first
-     * open after reset (measured 2026-09-16, PROTOCOL.md section 11). A caller
-     * that asked not to acknowledge must not be told it got that. */
-    if (Flags & SNIFF_MODE) {
-        op_err_set("PassThruConnect: SNIFF_MODE is accepted by the firmware but "
-                   "the cable still acknowledges frames");
-        return ERR_NOT_SUPPORTED;
-    }
+    if (Flags & SNIFF_MODE)
+        op_logf("SNIFF_MODE requested: firmware 1.17.4877 accepts the flag but "
+                "still acknowledges frames (PROTOCOL.md section 10)");
     if (BaudRate == 0)
         return fail(ERR_INVALID_BAUDRATE, "PassThruConnect");
     {
@@ -494,19 +335,13 @@ long PassThruConnect(J_U32 DeviceID, J_U32 ProtocolID, J_U32 Flags,
     rc = simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
     if (rc != STATUS_NOERROR) return fail(rc, "PassThruConnect");
 
-    /* The device names channels by number — proven by opening 6, seeing a
-     * second open rejected with ERR_CHANNEL_IN_USE, closing `atc6`, and
-     * finding the open accepted again. So the channel id we hand back is that
-     * number, which is also what the device expects on every later command;
-     * messages carry the protocol id the caller connected with. */
-    if (op_device_reset_channel(d, (unsigned)fw) != OP_OK) {
+    /* The firmware channel number is the channel id; messages carry the
+     * protocol id the caller connected with. */
+    if (op_device_open_channel(d, (unsigned)fw, (uint32_t)ProtocolID,
+                               (uint32_t)Flags, (uint32_t)BaudRate) != OP_OK) {
         op_err_set("PassThruConnect: no memory for the receive queue");
         return ERR_FAILED;
     }
-    d->ch[fw].open     = 1;
-    d->ch[fw].protocol = (uint32_t)ProtocolID;
-    d->ch[fw].flags    = (uint32_t)Flags;
-    d->ch[fw].baud     = (uint32_t)BaudRate;
 
     *pChannelID = (J_U32)fw;
     rec_line("= %d", fw);
@@ -526,17 +361,16 @@ long PassThruDisconnect(J_U32 ChannelID)
 
     op_err_clear();
     rec_line("disconnect %lu", (unsigned long)ChannelID);
-    if (!d->open) return fail(ERR_DEVICE_NOT_CONNECTED, "PassThruDisconnect");
+    if (!d->open) return fail(ERR_INVALID_DEVICE_ID, "PassThruDisconnect");
     if (channel_of(d, ChannelID) == NULL)
         return fail(ERR_INVALID_CHANNEL_ID, "PassThruDisconnect");
 
-    periodic_drop_channel(ChannelID);
-
+    /* atc stops the channel's periodic messages and drops its filters
+     * (measured, PROTOCOL.md section 10). */
     n = op_cmd_close(line, sizeof line, (unsigned)ChannelID);
     rc = simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
 
-    d->ch[ChannelID].open = 0;
-    op_device_flush_channel(d, (unsigned)ChannelID);
+    op_device_close_channel(d, (unsigned)ChannelID);
 
     if (rc != STATUS_NOERROR) return fail(rc, "PassThruDisconnect");
     return STATUS_NOERROR;
@@ -553,7 +387,7 @@ long PassThruReadMsgs(J_U32 ChannelID, PASSTHRU_MSG *pMsg, J_U32 *pNumMsgs,
 
     op_err_clear();
     rec_line("read %lu %lu %lu", (unsigned long)ChannelID, pNumMsgs ? (unsigned long)*pNumMsgs : 0UL, (unsigned long)Timeout);
-    if (!d->open) return fail(ERR_DEVICE_NOT_CONNECTED, "PassThruReadMsgs");
+    if (!d->open) return fail(ERR_INVALID_DEVICE_ID, "PassThruReadMsgs");
     if (pNumMsgs == NULL)
         return fail(ERR_NULL_PARAMETER, "PassThruReadMsgs(pNumMsgs)");
     want = *pNumMsgs;
@@ -564,19 +398,21 @@ long PassThruReadMsgs(J_U32 ChannelID, PASSTHRU_MSG *pMsg, J_U32 *pNumMsgs,
         return fail(ERR_INVALID_CHANNEL_ID, "PassThruReadMsgs");
     if (want == 0) return STATUS_NOERROR;
 
-    /* The caller's Timeout is the caller's. It is not scaled, floored or
-     * doubled here: a caller that asked for 50 ms gets 50 ms, and one that
-     * needs longer for a slow K-line init can say so. */
+    /* The caller's Timeout is honoured as given: not scaled, floored or
+     * doubled. */
     gettimeofday(&start, NULL);
     for (;;) {
         unsigned remaining;
         long elapsed_ms;
+        op_status st;
 
-        if (op_device_pop(d, (unsigned)ChannelID, &pMsg[got], 0) == OP_OK) {
+        st = op_device_pop(d, (unsigned)ChannelID, &pMsg[got], 0);
+        if (st == OP_OK) {
             got++;
             if (got >= want) break;
             continue;
         }
+        if (st != OP_ERR_TIMEOUT) goto closed;
 
         gettimeofday(&now, NULL);
         elapsed_ms = (long)((now.tv_sec - start.tv_sec) * 1000L +
@@ -585,10 +421,13 @@ long PassThruReadMsgs(J_U32 ChannelID, PASSTHRU_MSG *pMsg, J_U32 *pNumMsgs,
         if ((J_U32)elapsed_ms >= Timeout) break;
 
         remaining = (unsigned)(Timeout - (J_U32)elapsed_ms);
-        if (remaining > 20u) remaining = 20u;   /* stay responsive to stop */
-        if (op_device_pop(d, (unsigned)ChannelID, &pMsg[got], remaining) == OP_OK) {
+        if (remaining > 20u) remaining = 20u;
+        st = op_device_pop(d, (unsigned)ChannelID, &pMsg[got], remaining);
+        if (st == OP_OK) {
             got++;
             if (got >= want) break;
+        } else if (st != OP_ERR_TIMEOUT) {
+            goto closed;
         }
     }
 
@@ -635,6 +474,11 @@ long PassThruReadMsgs(J_U32 ChannelID, PASSTHRU_MSG *pMsg, J_U32 *pNumMsgs,
         return ERR_TIMEOUT;
     }
     return STATUS_NOERROR;
+
+closed:
+    /* PassThruClose ran on another thread while this call was waiting. */
+    *pNumMsgs = got;
+    return fail(ERR_INVALID_DEVICE_ID, "PassThruReadMsgs: device closed");
 }
 
 /* ---- 6. PassThruWriteMsgs ----------------------------------------------- */
@@ -644,26 +488,20 @@ static long write_one(op_device *d, J_U32 channel, const PASSTHRU_MSG *m,
 {
     char line[OP_CMD_MAX];
     size_t n;
+    uint32_t budget_us = 1000000u;
 
     if (m->DataSize == 0 || m->DataSize > sizeof m->Data)
         return ERR_INVALID_MSG;
 
-    /*
-     * J2534 gives a minimum and maximum message size per protocol. Only the
-     * bounds that are certain for this hardware are enforced: the minima, and
-     * the maxima that follow from the wire format itself. ISO14230's maximum
-     * depends on connect flags this driver does not track, so it is left
-     * alone — wrongly rejecting a valid message would be worse than letting
-     * the device reject it.
-     */
+    /* The size limits of J2534-1 Figure 42, where they are certain for this
+     * hardware; ISO14230's maximum depends on the checksum flag and is left
+     * to the device. */
     {
         J_U32 proto = op_protocol_base(d->ch[channel].protocol);
         size_t lo = 1, hi = sizeof m->Data;
-        if (proto == CAN)            { lo = 4; hi = 12; }   /* id + up to 8 */
-        else if (proto == ISO15765)  { lo = (m->TxFlags & ISO15765_ADDR_TYPE) ? 6 : 5;
-                                       hi = 4100; }
-        else if (proto == ISO14230)  { lo = 2; }
-        else if (proto == ISO9141)   { lo = 1; }
+        if (proto == CAN)            { lo = 4; hi = 12; }
+        else if (proto == ISO15765)  { lo = (m->TxFlags & ISO15765_ADDR_TYPE) ? 5 : 4;
+                                       hi = (m->TxFlags & ISO15765_ADDR_TYPE) ? 4100 : 4099; }
         if (m->DataSize < lo || m->DataSize > hi) {
             op_err_set("message of %lu bytes is outside the %zu-%zu range this "
                        "protocol allows", (unsigned long)m->DataSize, lo, hi);
@@ -671,10 +509,9 @@ static long write_one(op_device *d, J_U32 channel, const PASSTHRU_MSG *m,
         }
     }
 
-    /* ISO 15765-4 clause 8.1 requires a DLC of eight on every diagnostic CAN
-     * frame and says a receiver shall ignore a shorter one. The device pads
-     * only when ISO15765_FRAME_PAD is set. TxFlags belong to the application,
-     * so this does not rewrite them — it records the likely cause of the
+    /* ISO 15765-4 clause 8.1: a receiver ignores a diagnostic frame with a
+     * DLC below eight, and the device pads only on ISO15765_FRAME_PAD. TxFlags
+     * belong to the application; this only names the likely cause of the
      * silence the caller is about to see. */
     if (op_protocol_base(d->ch[channel].protocol) == ISO15765 &&
         !(m->TxFlags & ISO15765_FRAME_PAD) && m->DataSize < 12)
@@ -683,10 +520,11 @@ static long write_one(op_device *d, J_U32 channel, const PASSTHRU_MSG *m,
                 (unsigned long)channel);
 
     /* The firmware's transmit budget, as the vendor DLL sets it: the caller's
-     * Timeout in microseconds, one second when the caller passed 0. */
+     * Timeout in microseconds, one second for a Timeout of 0. */
+    if (timeout_ms != 0)
+        budget_us = timeout_ms > 4294967u ? 4294967295u : timeout_ms * 1000u;
     n = op_cmd_transmit(line, sizeof line, (unsigned)channel,
-                        (size_t)m->DataSize, (uint32_t)m->TxFlags,
-                        timeout_ms ? (uint32_t)timeout_ms * 1000u : 1000000u);
+                        (size_t)m->DataSize, (uint32_t)m->TxFlags, budget_us);
     if (n == 0) return ERR_INVALID_MSG;
 
     if (timeout_ms == 0)
@@ -709,7 +547,7 @@ long PassThruWriteMsgs(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
                  pNumMsgs ? (unsigned long)*pNumMsgs : 0UL, (unsigned long)Timeout);
         rec_msgs(head, pMsg, pNumMsgs ? *pNumMsgs : 0);
     }
-    if (!d->open) return fail(ERR_DEVICE_NOT_CONNECTED, "PassThruWriteMsgs");
+    if (!d->open) return fail(ERR_INVALID_DEVICE_ID, "PassThruWriteMsgs");
     if (pNumMsgs == NULL)
         return fail(ERR_NULL_PARAMETER, "PassThruWriteMsgs(pNumMsgs)");
     want = *pNumMsgs;
@@ -778,11 +616,17 @@ long PassThruWriteMsgs(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
 
 /* ---- 7/8. Periodic messages --------------------------------------------- */
 
+/* Scheduled by the firmware (`atm`/`atn`), as Tactrix's DLL does: the
+ * interval is kept to 0.1 ms and nothing on the host has to be awake. */
 long PassThruStartPeriodicMsg(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
                               J_U32 *pMsgID, J_U32 TimeInterval)
 {
     op_device *d = op_device_get();
-    int i, slot = -1;
+    op_channel *c;
+    char line[OP_CMD_MAX];
+    size_t n;
+    op_reply r;
+    long rc;
 
     op_err_clear();
     if (rec_on()) {
@@ -790,89 +634,58 @@ long PassThruStartPeriodicMsg(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
         snprintf(head, sizeof head, "startp %lu %lu", (unsigned long)ChannelID, (unsigned long)TimeInterval);
         rec_msgs(head, pMsg, 1);
     }
-    if (!d->open) return fail(ERR_DEVICE_NOT_CONNECTED, "PassThruStartPeriodicMsg");
+    if (!d->open) return fail(ERR_INVALID_DEVICE_ID, "PassThruStartPeriodicMsg");
     if (pMsg == NULL || pMsgID == NULL)
         return fail(ERR_NULL_PARAMETER, "PassThruStartPeriodicMsg");
-    if (channel_of(d, ChannelID) == NULL)
+    c = channel_of(d, ChannelID);
+    if (c == NULL)
         return fail(ERR_INVALID_CHANNEL_ID, "PassThruStartPeriodicMsg");
-    /* J2534 bounds the interval at 5..65535 ms. */
     if (TimeInterval < 5 || TimeInterval > 65535)
         return fail(ERR_INVALID_TIME_INTERVAL, "PassThruStartPeriodicMsg");
     if (pMsg->DataSize == 0 || pMsg->DataSize > sizeof pMsg->Data)
         return fail(ERR_INVALID_MSG, "PassThruStartPeriodicMsg");
-
-    pthread_mutex_lock(&g_periodic_lock);
-    {
-        int on_channel = 0;
-        for (i = 0; i < OP_MAX_PERIODIC; i++) {
-            if (g_periodic[i].used) {
-                if (g_periodic[i].channel == ChannelID) on_channel++;
-            } else if (slot < 0) {
-                slot = i;
-            }
-        }
-        if (on_channel >= OP_PERIODIC_PER_CH) slot = -1;
-    }
-
-    if (slot < 0) {
-        pthread_mutex_unlock(&g_periodic_lock);
+    if (c->nperiodic >= OP_PERIODIC_PER_CH)
         return fail(ERR_EXCEEDED_LIMIT, "PassThruStartPeriodicMsg");
-    }
 
-    g_periodic[slot].used        = 1;
-    g_periodic[slot].channel     = ChannelID;
-    g_periodic[slot].interval_ms = TimeInterval;
-    g_periodic[slot].msg         = *pMsg;
-    g_periodic[slot].missed      = 0;
-    gettimeofday(&g_periodic[slot].next, NULL);
-    pthread_mutex_unlock(&g_periodic_lock);
+    n = op_cmd_periodic_start(line, sizeof line, (unsigned)ChannelID,
+                              (uint32_t)TimeInterval * 1000u,
+                              (uint32_t)pMsg->TxFlags, (size_t)pMsg->DataSize);
+    if (n == 0) return fail(ERR_INVALID_MSG, "PassThruStartPeriodicMsg");
 
-    if (!periodic_start_thread(d)) {
-        pthread_mutex_lock(&g_periodic_lock);
-        g_periodic[slot].used = 0;
-        pthread_mutex_unlock(&g_periodic_lock);
-        return fail(ERR_FAILED, "PassThruStartPeriodicMsg: no thread");
-    }
+    rc = simple_cmd(d, line, n, pMsg->Data, (size_t)pMsg->DataSize,
+                    OP_DEFAULT_CMD_MS, &r);
+    if (rc != STATUS_NOERROR) return fail(rc, "PassThruStartPeriodicMsg");
+    if (r.kind != OP_REPLY_PERIODIC)
+        return fail(ERR_FAILED, "PassThruStartPeriodicMsg: unexpected reply");
 
-    *pMsgID = (J_U32)slot + 1u;
-    rec_line("= %lu", (unsigned long)slot + 1UL);
-    op_logf("periodic %d started on channel %lu every %lu ms",
-            slot, (unsigned long)ChannelID, (unsigned long)TimeInterval);
+    c->periodic[c->nperiodic++] = r.a;
+    *pMsgID = r.a;
+    rec_line("= %lu", (unsigned long)r.a);
+    op_logf("periodic %lu started on channel %lu every %lu ms",
+            (unsigned long)r.a, (unsigned long)ChannelID, (unsigned long)TimeInterval);
     return STATUS_NOERROR;
 }
 
 long PassThruStopPeriodicMsg(J_U32 ChannelID, J_U32 MsgID)
 {
     op_device *d = op_device_get();
-    int slot;
+    op_channel *c;
+    unsigned i;
+    long rc;
 
     op_err_clear();
     rec_line("stopp %lu %lu", (unsigned long)ChannelID, (unsigned long)MsgID);
-    if (!d->open) return fail(ERR_DEVICE_NOT_CONNECTED, "PassThruStopPeriodicMsg");
-    if (channel_of(d, ChannelID) == NULL)
+    if (!d->open) return fail(ERR_INVALID_DEVICE_ID, "PassThruStopPeriodicMsg");
+    c = channel_of(d, ChannelID);
+    if (c == NULL)
         return fail(ERR_INVALID_CHANNEL_ID, "PassThruStopPeriodicMsg");
-    if (MsgID == 0 || MsgID > OP_MAX_PERIODIC)
+    for (i = 0; i < c->nperiodic && c->periodic[i] != (uint32_t)MsgID; i++)
+        ;
+    if (i == c->nperiodic)
         return fail(ERR_INVALID_MSG_ID, "PassThruStopPeriodicMsg");
 
-    slot = (int)MsgID - 1;
-    pthread_mutex_lock(&g_periodic_lock);
-    if (!g_periodic[slot].used || g_periodic[slot].channel != ChannelID) {
-        pthread_mutex_unlock(&g_periodic_lock);
-        return fail(ERR_INVALID_MSG_ID, "PassThruStopPeriodicMsg");
-    }
-    g_periodic[slot].used = 0;
-    /*
-     * Marking the slot unused stops future sends, but the scheduler releases
-     * the periodic lock before transmitting — it must, or it would take the
-     * device command lock in the opposite order to everyone else. So a frame
-     * for this message may already be on the wire. Returning now would tell
-     * the caller nothing is transmitting while a frame is still going out, and
-     * a caller that then closes the channel or unplugs would be wrong about
-     * the state of the bus. Wait the in-flight transmit out.
-     */
-    while (g_periodic[slot].in_flight)
-        pthread_cond_wait(&g_periodic_idle, &g_periodic_lock);
-    pthread_mutex_unlock(&g_periodic_lock);
+    rc = periodic_stop(d, c, ChannelID, i);
+    if (rc != STATUS_NOERROR) return fail(rc, "PassThruStopPeriodicMsg");
     return STATUS_NOERROR;
 }
 
@@ -901,7 +714,7 @@ long PassThruStartMsgFilter(J_U32 ChannelID, J_U32 FilterType,
         rec_msg(pMaskMsg); rec_msg(pPatternMsg); rec_msg(pFlowControlMsg);
         fputc('\n', g_rec);
     }
-    if (!d->open) return fail(ERR_DEVICE_NOT_CONNECTED, "PassThruStartMsgFilter");
+    if (!d->open) return fail(ERR_INVALID_DEVICE_ID, "PassThruStartMsgFilter");
     if (channel_of(d, ChannelID) == NULL)
         return fail(ERR_INVALID_CHANNEL_ID, "PassThruStartMsgFilter");
     if (pFilterID == NULL)
@@ -986,7 +799,7 @@ long PassThruStopMsgFilter(J_U32 ChannelID, J_U32 FilterID)
 
     op_err_clear();
     rec_line("stopf %lu %lu", (unsigned long)ChannelID, (unsigned long)FilterID);
-    if (!d->open) return fail(ERR_DEVICE_NOT_CONNECTED, "PassThruStopMsgFilter");
+    if (!d->open) return fail(ERR_INVALID_DEVICE_ID, "PassThruStopMsgFilter");
     if (channel_of(d, ChannelID) == NULL)
         return fail(ERR_INVALID_CHANNEL_ID, "PassThruStopMsgFilter");
 
@@ -1006,36 +819,20 @@ long PassThruSetProgrammingVoltage(J_U32 DeviceID, J_U32 PinNumber, J_U32 Voltag
     op_device *d = op_device_get();
     char line[OP_CMD_MAX];
     int n;
-    const char *gate;
 
     op_err_clear();
     rec_line("progv %lu %lu %lu", (unsigned long)DeviceID, (unsigned long)PinNumber, (unsigned long)Voltage);
-    if (!d->open)
-        return fail(ERR_DEVICE_NOT_CONNECTED, "PassThruSetProgrammingVoltage");
-    if (DeviceID != OP_DEVICE_ID)
+    if (!d->open || DeviceID != OP_DEVICE_ID)
         return fail(ERR_INVALID_DEVICE_ID, "PassThruSetProgrammingVoltage");
 
-    /* This energises a pin on the vehicle connector. It is real and it works,
-     * but an application that calls it by accident can put voltage on a pin
-     * that is wired to something else, so applying voltage requires a
-     * deliberate opt-in. Turning it OFF is always allowed. */
-    gate = getenv("OPENPORT_ENABLE_PROG_VOLTAGE");
-    if (Voltage != VOLTAGE_OFF && (gate == NULL || gate[0] != '1')) {
-        op_err_set("Programming voltage is gated; set "
-                   "OPENPORT_ENABLE_PROG_VOLTAGE=1");
-        op_logf("refused programming voltage %lu mV on pin %lu: gate not set",
-                (unsigned long)Voltage, (unsigned long)PinNumber);
-        return ERR_NOT_SUPPORTED;
-    }
-    /* Every voltage pin is fed from one adjustable supply: with 5 V on pin 13,
-     * 9 V on pin 12 moved the supply to 9.3 V and pin 13 was not switched off
-     * (measured 2026-09-16), so a second pin silently changes the first. Pin 0,
-     * the 2.5 mm jack, drives J1962 pin 12 too while no plug is inserted. */
+    /* J2534-1 section 7.2.11: one pin at a time, ground excepted. On this
+     * cable every voltage pin is fed from one supply, so a second pin would
+     * silently move the first (measured 2026-09-16). */
     if (Voltage != VOLTAGE_OFF && Voltage != SHORT_TO_GROUND && PinNumber < 32 &&
         (d->pins_powered & ~(1u << PinNumber)) != 0) {
         op_err_set("PassThruSetProgrammingVoltage: another pin already has "
                    "voltage, and all pins share one supply; switch it off first");
-        return ERR_EXCEEDED_LIMIT;
+        return ERR_PIN_INVALID;
     }
     if (Voltage == SHORT_TO_GROUND) {
         unsigned i;
@@ -1083,8 +880,7 @@ long PassThruReadVersion(J_U32 DeviceID, char *pFirmwareVersion,
 
     op_err_clear();
     rec_line("version %lu", (unsigned long)DeviceID);
-    if (!d->open) return fail(ERR_DEVICE_NOT_CONNECTED, "PassThruReadVersion");
-    if (DeviceID != OP_DEVICE_ID)
+    if (!d->open || DeviceID != OP_DEVICE_ID)
         return fail(ERR_INVALID_DEVICE_ID, "PassThruReadVersion");
     if (pFirmwareVersion == NULL || pDllVersion == NULL || pApiVersion == NULL)
         return fail(ERR_NULL_PARAMETER, "PassThruReadVersion");
@@ -1269,7 +1065,7 @@ long PassThruIoctl(J_U32 ChannelID, J_U32 IoctlID, const void *pInput,
         }
         fputc('\n', g_rec);
     }
-    if (!d->open) return fail(ERR_DEVICE_NOT_CONNECTED, "PassThruIoctl");
+    if (!d->open) return fail(ERR_INVALID_DEVICE_ID, "PassThruIoctl");
 
     switch (IoctlID) {
 
@@ -1279,12 +1075,18 @@ long PassThruIoctl(J_U32 ChannelID, J_U32 IoctlID, const void *pInput,
         /* J2534 declares pInput const, yet GET_CONFIG is defined to write
          * each Value back into the caller's SCONFIG list. The cast is the
          * standard's contradiction, not a discarded qualifier of ours. */
-        return ioctl_get_config(d, ChannelID, (SCONFIG_LIST *)(uintptr_t)pInput);
+        {
+            long rc = ioctl_get_config(d, ChannelID, (SCONFIG_LIST *)(uintptr_t)pInput);
+            return rc == STATUS_NOERROR ? rc : fail(rc, "PassThruIoctl(GET_CONFIG)");
+        }
 
     case SET_CONFIG:
         if (channel_of(d, ChannelID) == NULL)
             return fail(ERR_INVALID_CHANNEL_ID, "PassThruIoctl(SET_CONFIG)");
-        return ioctl_set_config(d, ChannelID, (const SCONFIG_LIST *)pInput);
+        {
+            long rc = ioctl_set_config(d, ChannelID, (const SCONFIG_LIST *)pInput);
+            return rc == STATUS_NOERROR ? rc : fail(rc, "PassThruIoctl(SET_CONFIG)");
+        }
 
     case READ_VBATT:
         /* Device-scoped, so it is valid before any channel exists. */
@@ -1324,11 +1126,18 @@ long PassThruIoctl(J_U32 ChannelID, J_U32 IoctlID, const void *pInput,
         op_device_flush_channel(d, (unsigned)ChannelID);
         return STATUS_NOERROR;
 
-    case CLEAR_PERIODIC_MSGS:
-        if (channel_of(d, ChannelID) == NULL)
+    case CLEAR_PERIODIC_MSGS: {
+        op_channel *c = channel_of(d, ChannelID);
+        if (c == NULL)
             return fail(ERR_INVALID_CHANNEL_ID, "PassThruIoctl(CLEAR_PERIODIC_MSGS)");
-        periodic_drop_channel(ChannelID);
+        while (c->nperiodic > 0) {
+            unsigned before = c->nperiodic;
+            long rc = periodic_stop(d, c, ChannelID, c->nperiodic - 1);
+            if (c->nperiodic == before)
+                return fail(rc, "PassThruIoctl(CLEAR_PERIODIC_MSGS)");
+        }
         return STATUS_NOERROR;
+    }
 
     case CLEAR_MSG_FILTERS: {
         unsigned id;

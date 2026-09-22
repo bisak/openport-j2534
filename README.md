@@ -1,30 +1,27 @@
 # openport-j2534 — Tactrix OpenPort 2.0 driver for macOS and Linux
 
-An open-source **SAE J2534 PassThru driver for the Tactrix OpenPort 2.0** cable
-on **macOS Apple Silicon (M1, M2, M3, M4) and Intel Macs**, and on Linux.
-It is a drop-in `libj2534` that any J2534 application, or a few lines of
-Python `ctypes`, can load to talk CAN, ISO 15765 (ISO-TP) and K-line
-(ISO 9141 / ISO 14230) to a vehicle through the OpenPort 2.0.
+An open-source **SAE J2534 PassThru driver for the Tactrix OpenPort 2.0**
+cable on **macOS (Apple Silicon and Intel) and Linux**. It is a drop-in
+`libj2534` that any J2534 application, or a few lines of Python `ctypes`, can
+load to talk CAN, ISO 15765 (ISO-TP) and K-line (ISO 9141 / ISO 14230) to a
+vehicle through the OpenPort 2.0.
 
 Tactrix ships a Windows driver only: no macOS or Linux driver, no SDK, no
-source, and no published protocol specification. This is an independent
-implementation written against the J2534-1 standard and a wire protocol
-established by observing the cable. That protocol is written down in
-[`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+source, no protocol specification. This driver is written against the J2534-1
+standard and a wire protocol established by observing the cable and by running
+Tactrix's own Windows DLL against the same cable. The protocol is written down
+in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
 - No `sudo`, no kernel extensions, no boot arguments.
 - Every USB transfer is bounded; a wedged cable returns `ERR_TIMEOUT`, never a hang.
 - Every result is honest: a transmit the cable rejected is reported as rejected.
-- Verified against real vehicles and, byte for byte on the wire, against
-  Tactrix's own Windows driver ([`docs/AB-OFFICIAL.md`](docs/AB-OFFICIAL.md)).
+- Byte-for-byte parity with Tactrix's own driver on the wire, verified with
+  the vendor DLL running against the same cable ([`docs/AB-OFFICIAL.md`](docs/AB-OFFICIAL.md)).
 - Hardware-free test suite: unit tests, fuzzing, sanitizers, a protocol simulator.
 
 GPL-3.0-or-later. Not affiliated with or endorsed by Tactrix.
 
 ## Install
-
-No kernel extensions, no `sudo`, no SIP or recovery-mode changes: the driver
-is an ordinary user-space library on libusb.
 
 ### Homebrew (macOS)
 
@@ -32,8 +29,8 @@ is an ordinary user-space library on libusb.
 brew install bisak/tap/openport-j2534
 ```
 
-Homebrew asks you to trust the `bisak/tap` tap the first time (or run
-`brew trust bisak/tap` beforehand). The formula lives in
+Homebrew asks you to trust the `bisak/tap` tap the first time (`brew trust
+bisak/tap`). The formula lives in
 [bisak/homebrew-tap](https://github.com/bisak/homebrew-tap) and builds the
 latest release from source in about a second; `--HEAD` builds `main`.
 
@@ -62,19 +59,6 @@ op_probe
 It should report `0403:cc4d`. If the cable enumerates as a disk instead,
 remove the microSD card and re-plug.
 
-## Why another driver
-
-A community macOS driver exists. It **returns success for operations it did
-not perform**: a transmit the device rejected, messages that were never
-received. That is dangerous when the caller is erasing an ECU. See
-[`docs/DIFFERENTIAL.md`](docs/DIFFERENTIAL.md) for the measured comparison.
-
-That lineage (`NikolaKozina/j2534`, BSD 3-Clause) could have been built on;
-this driver is not justified by necessity but by what it does differently: an
-architecture with a testable seam, every libusb call checked, every timeout
-bounded, and the correctness differences documented and measured. Nothing here
-is derived from that codebase.
-
 ## Use
 
 ```c
@@ -89,43 +73,45 @@ PassThruClose(dev);
 ```
 
 From Python via `ctypes`, or from any existing J2534 application, unchanged.
+The API is J2534-1 04.04, the revision Tactrix's DLL reports; its constants
+and the Tactrix-specific ones (J2534-2 channel ids, `SNIFF_MODE`,
+`TX_PARAM_STOP_BITS`, pin numbers) are in the header.
 
 ```bash
 ./examples/op_smoke        # end-to-end check against a real cable
 ./tools/op_probe           # dump the cable's USB descriptors
 ```
 
-### Supported hardware and protocols
+### Hardware and protocols
 
-OpenPort 2.0 (`0403:cc4d`). Device detection and protocol handling are factored
-so a second device can be added without restructuring.
+OpenPort 2.0 (`0403:cc4d`), firmware 1.17.4877 measured.
 
-| Protocol | Supported |
+| Protocol | Status |
 |---|---|
-| ISO15765 (CAN + ISO-TP) | yes — segmentation is done by the cable's firmware |
-| CAN (raw) | yes |
-| ISO9141, ISO14230 (K-line) | yes, but see the conformance matrix |
-| ISO9141, ISO14230 on the L line (`ISO9141_L`, `ISO14230_L`) | opens the channels Tactrix's DLL opens; **no data measured** |
-| RS-232 receive on the 2.5 mm jack (`ISO9141_INNO`, for Innovate MTS) | opens, `TX_PARAM_STOP_BITS` configurable; **no data measured** |
-| SCI A/B | **no** — refused with `ERR_INVALID_PROTOCOL_ID`, as Tactrix's DLL does; the firmware's channels 7–9 are the L line and the jack, not SCI |
-| J1850 VPW/PWM | **no** — the firmware rejects it; Tactrix lists it as "support pending" |
+| ISO15765 (CAN + ISO-TP) | complete; segmentation is done by the cable's firmware |
+| CAN (raw) | complete |
+| ISO9141, ISO14230 (K-line) | complete; frame layout from three implementations, not yet captured on this project's cable |
+| ISO9141, ISO14230 on the L line (`ISO9141_L`, `ISO14230_L`) | opens the channels Tactrix's DLL opens; no data measured |
+| RS-232 receive on the 2.5 mm jack (`ISO9141_INNO`) | opens, `TX_PARAM_STOP_BITS` configurable; no data measured |
+| SCI A/B, J1850 VPW/PWM | refused with `ERR_INVALID_PROTOCOL_ID`, as Tactrix's DLL does; the firmware has no channel for them |
 
 ## J2534 conformance
 
-Honest, not aspirational. "Untested" means implemented but never exercised
-against a vehicle.
+Everything below is exercised by the test suite and, where a cable was
+involved, compared against Tactrix's DLL. "Untested" means implemented but
+never exercised against a vehicle.
 
 ### Entry points
 
 | Function | Status |
 |---|---|
-| `PassThruOpen` / `Close` | complete |
-| `PassThruConnect` / `Disconnect` | complete, J2534-2 channel ids included; `SNIFF_MODE` refused (the firmware accepts it but still acknowledges frames) |
+| `PassThruOpen` / `Close` | complete; open resets the cable so a session never inherits a channel, a periodic message or a live pin |
+| `PassThruConnect` / `Disconnect` | complete, J2534-2 channel ids included; connect flags go to the firmware unchanged |
 | `PassThruReadMsgs` | complete; timeout honoured exactly as given; 1 MiB queue per channel, an overrun is reported as `ERR_BUFFER_OVERFLOW` |
-| `PassThruWriteMsgs` | complete |
-| `PassThruStartPeriodicMsg` / `StopPeriodicMsg` | complete, host-scheduled, 10 per channel |
+| `PassThruWriteMsgs` | complete; the caller's timeout is the firmware's transmit budget, as the vendor sends it |
+| `PassThruStartPeriodicMsg` / `StopPeriodicMsg` | complete, scheduled by the firmware (`atm`/`atn`), 10 per channel |
 | `PassThruStartMsgFilter` / `StopMsgFilter` | complete (PASS, BLOCK, FLOW_CONTROL) |
-| `PassThruSetProgrammingVoltage` | complete, **gated** — see below |
+| `PassThruSetProgrammingVoltage` | complete, see below |
 | `PassThruReadVersion` | complete |
 | `PassThruGetLastError` | complete |
 | `PassThruIoctl` | see below |
@@ -136,55 +122,58 @@ against a vehicle.
 |---|---|---|
 | 1, 2 | `GET_CONFIG`, `SET_CONFIG` | complete; passed to the firmware, whose supported set differs per protocol (`PROTOCOL.md` §8); an unsupported parameter returns `ERR_NOT_SUPPORTED`, as the device reports |
 | 3 | `READ_VBATT` | complete |
-| 4, 5 | `FIVE_BAUD_INIT`, `FAST_INIT` | implemented from the DLL-derived command form (`PROTOCOL.md` §4), five-baud with `SBYTE_ARRAY` in/out as the standard specifies, **untested on hardware** — needs a K-line vehicle |
-| 7, 8 | `CLEAR_TX_BUFFER`, `CLEAR_RX_BUFFER` | complete |
+| 4, 5 | `FIVE_BAUD_INIT`, `FAST_INIT` | the commands Tactrix's DLL sends, with `SBYTE_ARRAY` in/out for five-baud as the standard specifies; **untested on hardware**, needs a K-line vehicle |
+| 7, 8 | `CLEAR_TX_BUFFER`, `CLEAR_RX_BUFFER` | complete, host-side as in the vendor DLL |
 | 9, 10 | `CLEAR_PERIODIC_MSGS`, `CLEAR_MSG_FILTERS` | complete |
-| 11–13 | functional message table | `ERR_NOT_SUPPORTED` — J1850 only, which this hardware rejects |
+| 11–13 | functional message table | `ERR_NOT_SUPPORTED`: J1850 only, which this hardware rejects |
 | 14 | `READ_PROG_VOLTAGE` | complete; reads pin 12, or the pin `pInput` points to as in Tactrix's DLL (8, 12, 16, or 17 for the adjustable supply) |
+
+### Where this driver deliberately differs from Tactrix's DLL
+
+Return codes follow the J2534-1 text where the vendor departs from it: any
+call before `PassThruOpen` or after `PassThruClose` returns
+`ERR_INVALID_DEVICE_ID`, a NULL message pointer returns `ERR_NULL_PARAMETER`,
+an unknown ioctl returns `ERR_INVALID_IOCTL_ID`. Programming voltage on a
+second pin, and grounding the K or L line under a channel that uses it, are
+refused (below); the vendor passes them to the cable. Everything else the two
+drivers put on the wire is the same, command for command
+([`docs/AB-OFFICIAL.md`](docs/AB-OFFICIAL.md)).
 
 ### Known gaps
 
-- **The receive path is validated on live hardware** (2026-09-13, a 2012 VW
-  Caddy): legislated OBD and UDS `$22`/`$09` replies, including multi-frame
-  reassembly of the VIN, came through the driver's own entry points correctly,
-  and `tests/unit/test_golden.c` carries the trace. One caveat learned there: a
-  real ECU may ignore an **unpadded** request, so a caller must set the
-  `ISO15765_FRAME_PAD` TxFlag. `docs/PROTOCOL.md` §10 lists the remaining open
-  items (K-line framing and >250-byte chunking, both needing a car that uses
-  them).
 - **K-line frame layout** is implemented from three independent sources but
-  not yet measured on this project's hardware (`PROTOCOL.md` §7).
+  not yet measured on this project's hardware (`PROTOCOL.md` §7). A bench
+  ECU simulator with ISO 9141-2 and KWP2000 would settle it in an afternoon.
+- **Replies longer than one wire frame (250 bytes)** are reassembled the way
+  Tactrix's DLL reassembles them (the CAN id repeated in every chunk); no
+  capture of one from the cable exists yet.
 - The L-line and jack channels are wired to what Tactrix's DLL sends, but no
   L-line ECU or Innovate device has been attached to confirm their data.
+- A real ECU may ignore an **unpadded** ISO15765 request, so a caller must set
+  the `ISO15765_FRAME_PAD` TxFlag, as the vendor's own samples do.
 
 ## Programming voltage
 
-The OpenPort 2.0 can put programming voltage on a connector pin — used for some
-bench and bootloader reflash procedures. It is implemented (`atv`), and it is
-**off by default**:
+The OpenPort 2.0 can put a voltage on a connector pin or short it to ground
+(`atv`), used by some bench and bootloader reflash procedures. This works as
+it does with Tactrix's DLL, with three rules the cable itself does not
+enforce:
 
-```bash
-OPENPORT_ENABLE_PROG_VOLTAGE=1 ./your-tool
-```
-
-Without that, applying a voltage or `SHORT_TO_GROUND` returns
-`ERR_NOT_SUPPORTED` and nothing reaches the cable. Switching it **off**
-(`VOLTAGE_OFF`) is always permitted, so a caller can always make the pin safe.
-
-The cable accepts 5000–20000 mV (outside that, `ERR_OEM_VOLTAGE_TOO_LOW` or
-`_TOO_HIGH`), and every voltage pin is fed from one supply: a second pin would
-silently move the first one's voltage, so it returns `ERR_EXCEEDED_LIMIT` until
-the first is switched off. `READ_PROG_VOLTAGE` with pin 17 reads the supply.
-
-Grounding K (pin 7) while an ISO9141 or ISO14230 channel is open, or L
-(pin 15) while an L-line channel is open, returns `ERR_CHANNEL_IN_USE`, and so
-does opening such a channel while this session holds its pin grounded. The
-firmware and Tactrix's DLL both allow it, and it silently ends communication
-on that line.
+- The cable accepts 5000–20000 mV; outside that it answers
+  `ERR_OEM_VOLTAGE_TOO_LOW` or `_TOO_HIGH`.
+- Every voltage pin is fed from one supply, so a second pin would silently
+  move the first pin's voltage. A second pin is refused with
+  `ERR_PIN_INVALID` until the first is switched off, as J2534-1 §7.2.11
+  requires. `READ_PROG_VOLTAGE` with pin 17 reads the supply.
+- Grounding K (pin 7) while an ISO9141 or ISO14230 channel is open, or L
+  (pin 15) while an L-line channel is open, returns `ERR_CHANNEL_IN_USE`, and
+  so does opening such a channel while this session holds its pin grounded.
+  The cable allows it and it silently ends communication on that line.
 
 Pin 12 is also the tip of the 2.5 mm jack: with a plug inserted, the cable
 disconnects it from the vehicle connector, and `atv 12` drives the jack
-instead. Which pins accept what is in `docs/PROTOCOL.md` §8.
+instead. Which pins accept what is in `docs/PROTOCOL.md` §8. `PassThruOpen`
+and `PassThruClose` both reset the cable, which switches every output off.
 
 ## Logging
 
@@ -193,28 +182,30 @@ OPENPORT_LOG=/tmp/op.log OPENPORT_LOG_HEX=1 ./your-tool
 ```
 
 `OPENPORT_LOG` takes a path, or `-`/`stderr`. `OPENPORT_LOG_HEX=1` adds every
-byte transferred. Off unless asked for.
+byte transferred. `OPENPORT_RECORD=<file>` records every entry-point call for
+replay through another J2534 library (`docs/AB-OFFICIAL.md`). All off unless
+asked for.
 
 ## Troubleshooting
 
-**`PassThruOpen` returns 8 (`ERR_DEVICE_NOT_CONNECTED`)** — call
+**`PassThruOpen` returns 8 (`ERR_DEVICE_NOT_CONNECTED`)**: call
 `PassThruGetLastError`, which names the actual cause. Then:
 
-- **"enumerated as USB mass storage"** — a microSD card is inserted. The cable
+- **"enumerated as USB mass storage"**: a microSD card is inserted. The cable
   presents as a disk and the data interface is unavailable. Remove the card and
   re-plug.
-- **No cable found** — check `./tools/op_probe`. It should report `0403:cc4d`.
-- **Returns 14 (`ERR_DEVICE_IN_USE`)** — another program holds the interface.
+- **No cable found**: check `./tools/op_probe`. It should report `0403:cc4d`.
+- **Returns 14 (`ERR_DEVICE_IN_USE`)**: another program holds the interface.
   Close other J2534 applications.
 
 **It hangs.** It should not: every transfer is bounded and a wedged cable
-returns `ERR_TIMEOUT`. If you see a genuine hang, that is a bug — please report
-it with `OPENPORT_LOG_HEX=1` output.
+returns `ERR_TIMEOUT`. A genuine hang is a bug; please report it with
+`OPENPORT_LOG_HEX=1` output.
 
-**Results look shifted — a call returns the previous call's answer.** This
-driver synchronises at open and discards orphan replies specifically to prevent
-that (`PROTOCOL.md` §9.2). If you still see it, it is a bug; the log will show
-it.
+**A call returns the previous call's answer.** Every command carries a
+sequence number and only the reply that echoes it is accepted
+(`PROTOCOL.md` §3), so this cannot happen by design. If it does, it is a bug;
+the log will show it.
 
 **`sudo` is not the fix** for anything here. If claiming fails, the error says
 why.
@@ -222,7 +213,7 @@ why.
 ## Layout
 
 ```
-include/j2534/j2534.h   the standard API
+include/j2534/j2534.h   the standard API, plus Tactrix's own constants
 src/op_proto.c          wire codec: pure, no I/O, fully unit-tested
 src/op_transport.h      byte-pipe interface (a second device plugs in here)
 src/op_usb.c            libusb bulk transport
@@ -258,15 +249,15 @@ See [`docs/TESTING.md`](docs/TESTING.md) for what each layer proves.
 Read-only diagnostics are safe. Reflashing is not: a driver that lies about a
 failed transmit can brick an ECU, which is the reason this driver exists, but
 it cannot protect against a wrong image or a wrong tool. Programming voltage
-is off unless `OPENPORT_ENABLE_PROG_VOLTAGE=1` is set. Everything in
-`tools/car/` is read-only by construction. You are responsible for what you
-send to your vehicle.
+works exactly as with the vendor driver: an application that asks for it gets
+it. Everything in `tools/car/` is read-only by construction. You are
+responsible for what you send to your vehicle.
 
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). The most valuable contribution is
 **live-bus data** from a vehicle this driver has not seen, especially one that
-speaks K-line: `PROTOCOL.md` §10 lists what is still open.
+speaks K-line: `PROTOCOL.md` §12 lists what is still open.
 
 ## License
 

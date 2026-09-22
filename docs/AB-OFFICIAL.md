@@ -108,12 +108,9 @@ of this harness is what confirms it.
 - **`atm` is the firmware's periodic message.** `PassThruStartPeriodicMsg`
   (100 ms) sends `atm6 100000 0 64 6 <seq>` + payload: interval in
   microseconds, a 0, TxFlags, length, sequence. `PassThruStopPeriodicMsg` sends
-  `atn6 <id> <seq>`. `PROTOCOL.md` §4 had `atm` as "purpose unknown" and
-  `atp` as the periodic command that the firmware rejects for every interval.
-  On the cable `atm` answers `arm6 0 <seq>`, then `arm6 1 <seq>`; the
-  firmware's periodic facility works. This driver still schedules on the
-  host: measured against a bench ECU, a firmware periodic keeps transmitting
-  after the application is killed (`PROTOCOL.md` §11).
+  `atn6 <id> <seq>`. On the cable `atm` answers `arm6 0 <seq>`, then
+  `arm6 1 <seq>`, and the facility was measured against a bench ECU
+  (`PROTOCOL.md` §10). This driver sends the same commands.
 - **`SetProgrammingVoltage(pin, VOLTAGE_OFF)` is sent as `atv 12 -1`**, the
   value printed signed. This driver sends it the same way since 2026-09-16;
   the firmware accepts both forms.
@@ -129,8 +126,8 @@ of this harness is what confirms it.
   reply chunked with the id only in the first frame, the DLL delivered 598
   bytes; fed the same reply with the id at the start of every continuation
   chunk, it delivered all 606 bytes intact. Tactrix's own consumer reads the
-  firmware as `id_every_chunk`, which is now the simulator's default. This
-  driver reassembles correctly under either model.
+  firmware as `id_every_chunk`, which is the simulator's default. This
+  driver strips the id from every continuation chunk, as the DLL does.
 - **Multi-frame delivery shape matches.** Both drivers hand the application a
   4-byte `ISO15765_FIRST_FRAME` indication and then one complete message,
   which is what J2534 Table 72 asks for.
@@ -165,15 +162,12 @@ of this harness is what confirms it.
   a bit-banged init from an FTDI cable would tell the two apart.
 - **On the Audi's CAN, both drivers delivered the identical raw frames**: the
   `$01 00` request echoed on 0x7DF and the engine's reply on 0x7E8
-  (`06 41 00 98 3b 80 19`), same status bits, same sizes. The one shape
-  difference on a live bus is the transmit-done indication: the vendor hands
-  the application a 4-byte message carrying the CAN id, this driver a 0-byte
-  one, per J2534 Table 13 (`docs/DIFFERENTIAL.md`, decisions).
+  (`06 41 00 98 3b 80 19`), same status bits, same sizes. The transmit-done
+  indication has the same shape too: a 4-byte message carrying the CAN id,
+  as J2534-1 §8.6 specifies.
 - **A running periodic message is silent in the vendor DLL**: `atm` on the
   live bus produced no transmit-indication frames at all in 550 ms, and the
-  application read nothing. This driver's host scheduler transmits with
-  `att`, whose indication frame it used to pass on, ten a second at 100 ms.
-  It now drops the indication for periodic transmits.
+  application read nothing. This driver uses `atm` and sees the same.
 
 ## API semantics where the two disagree
 
@@ -183,15 +177,14 @@ against. Both are listed so a decision is a decision and not an accident.
 
 | Call | Vendor | This driver |
 |---|---|---|
-| `PassThruDisconnect(9)` before any open | `ERR_INVALID_CHANNEL_ID` (2) | `ERR_DEVICE_NOT_CONNECTED` (8) |
+| `PassThruDisconnect(9)` before any open | `ERR_INVALID_CHANNEL_ID` (2) | `ERR_INVALID_DEVICE_ID` (26), J2534-1 §7.2.1 |
 | `PassThruIoctl(deviceId, 0xDEAD)` | `ERR_INVALID_CHANNEL_ID` (2) | `ERR_INVALID_IOCTL_ID` (15) |
 | `PassThruStartMsgFilter` with a NULL mask | `ERR_FAILED` (7) | `ERR_NULL_PARAMETER` (4) |
-| `PassThruClose` twice | `ERR_INVALID_DEVICE_ID` (26) | `ERR_DEVICE_NOT_CONNECTED` (8) |
 | `PassThruReadMsgs(timeout=0)` on an idle channel | returns after ~6 ms | returns in microseconds |
 | `PassThruIoctl(READ_PROG_VOLTAGE)` with `pInput` NULL, as J2534-1 passes it | -1, nothing sent | reads pin 12 |
 | `SetProgrammingVoltage(7, SHORT_TO_GROUND)` under an open ISO9141 channel | `atv 7 -2`, 0 | `ERR_CHANNEL_IN_USE` (20), nothing sent |
 | `PassThruConnect(ISO14230)` while K is grounded | 0 | `ERR_CHANNEL_IN_USE` (20) |
-| `SetProgrammingVoltage` on a second pin while one holds a voltage | `atv`, 0 | `ERR_EXCEEDED_LIMIT` (12), nothing sent |
+| `SetProgrammingVoltage` on a second pin while one holds a voltage | `atv`, 0 | `ERR_PIN_INVALID` (19), nothing sent |
 | `PassThruConnect(SCI_A_ENGINE)` and other ids with no firmware channel | `ato0`, `are 3`, `ERR_INVALID_PROTOCOL_ID` | `ERR_INVALID_PROTOCOL_ID`, nothing sent |
 
 The last five are from cable replays on 2026-09-16 (`PROTOCOL.md` §5, §8).

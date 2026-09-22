@@ -390,21 +390,16 @@ def s_loopback():
     stop.set()
 
 
-def s_periodic_pacing():
+def s_periodic_keepalive():
     """
-    A periodic keep-alive must keep its period, and must never fire a burst.
-
-    Two failure modes, both real before this was fixed:
-      - drift: scheduling the next send as now+interval AFTER the transmit
-        returns makes each period interval+transmit_time, so a 50 ms keep-alive
-        silently becomes 90 ms and an ECU times the session out.
-      - stampede: if a transmit blocks and the deadline passes several times
-        over, "catching up" puts a clump of frames on a vehicle bus at once.
+    A periodic keep-alive is scheduled by the firmware (`atm`/`atn`), as the
+    vendor DLL does it. End to end through the simulator's model of that
+    facility: the interval reaches the device in microseconds, the ECU's
+    answers to each transmission are received, no transmit indication is
+    queued for them, and Stop stops it.
     """
     ecu = {b"\x3e\x00": b"\x7e\x00"}
-    f = Faults(); f.reply_delay = 0.030      # a transmit takes real time
-    path, stop, th, sim = scenario("periodic keep-alive: keeps its period, never bursts",
-                                   ecu=ecu, faults=f)
+    path, stop, th, sim = scenario("periodic keep-alive runs in the firmware", ecu=ecu)
     d = fresh_lib()
     dev = U32(); d.PassThruOpen(None, ctypes.byref(dev))
     ch, _ = connect(d, dev)
@@ -416,27 +411,26 @@ def s_periodic_pacing():
     d.PassThruStopPeriodicMsg.argtypes = [U32, U32]
     rc = d.PassThruStartPeriodicMsg(ch, ctypes.byref(m), ctypes.byref(mid), 50)
     check(rc == 0, "StartPeriodicMsg at 50 ms", rc)
+    c = sim.channels.get(6)
+    check(c is not None and mid.value in c.periodic and c.periodic[mid.value][0] == 0.05,
+          "the firmware holds it with a 50 ms interval (sent as 50000 us)")
 
     sim.tx_times.clear()
-    time.sleep(1.2)
+    time.sleep(0.6)
+    inbuf = (PASSTHRU_MSG * 32)(); cnt = U32(32)
+    rc = d.PassThruReadMsgs(ch, inbuf, ctypes.byref(cnt), 0)
+    replies = [i for i in range(cnt.value)
+               if inbuf[i].RxStatus == 0 and bytes(inbuf[i].Data[4:6]) == b"\x7e\x00"]
+    indications = [i for i in range(cnt.value) if inbuf[i].RxStatus & 0x08]
+    check(len(sim.tx_times) >= 8, f"the firmware transmitted repeatedly ({len(sim.tx_times)} in 0.6 s)")
+    check(len(replies) >= 8, f"and the ECU's answers were received ({len(replies)})")
+    check(not indications, "with no transmit indication for any of them", len(indications))
+
     d.PassThruStopPeriodicMsg(ch, mid)
-    times = list(sim.tx_times)
-
-    check(len(times) >= 8, f"transmitted repeatedly ({len(times)} in 1.2 s)", len(times))
-    if len(times) >= 3:
-        gaps = [(b - a) * 1000.0 for a, b in zip(times, times[1:])]
-        gaps.sort()
-        median = gaps[len(gaps) // 2]
-        fastest = gaps[0]
-        check(35 <= median <= 75,
-              f"median period is near 50 ms (got {median:.0f} ms)", f"{median:.0f}")
-        # A stampede shows up as gaps far below the interval.
-        check(fastest >= 10,
-              f"no burst: closest pair {fastest:.0f} ms apart", f"{fastest:.0f}")
-
-    time.sleep(0.3)
+    check(mid.value not in c.periodic, "Stop removed it from the firmware")
+    time.sleep(0.15)
     before = len(sim.tx_times)
-    time.sleep(0.4)
+    time.sleep(0.3)
     check(len(sim.tx_times) == before, "nothing transmits after Stop",
           len(sim.tx_times) - before)
     d.PassThruClose(dev)
@@ -690,8 +684,13 @@ def s_capture_tool_pads():
 # would still be worth having, but no longer decides whether the data is right.
 # ---------------------------------------------------------------------------
 def s_chunking_models():
+    """A 600-byte reply crosses two wire-frame boundaries. Under the layout
+    the vendor DLL reassembles (the id repeated in every chunk) it comes back
+    intact; under the other layout the driver, like the vendor DLL, strips
+    four bytes per continuation chunk (tools/ab-official, 2026-09-13)."""
     body = bytes((i * 7 + 3) & 0xFF for i in range(600))
-    for model, expect_clean in (("id_first_only", True), ("id_every_chunk", True)):
+    full = b"\x00\x00\x07\xe8" + body
+    for model, expect in (("id_every_chunk", full), ("id_first_only", full[:250] + full[254:500] + full[504:])):
         ecu = {b"\x22\x01\x00": body}
         path, stop, th, sim = scenario(f"600-byte reply, chunking={model}", ecu=ecu)
         sim.wire.chunking = model
@@ -707,12 +706,12 @@ def s_chunking_models():
         for i in range(cnt.value):
             if not (inbuf[i].RxStatus & (TX_MSG_TYPE | START_OF_MESSAGE)):
                 data = bytes(inbuf[i].Data[:inbuf[i].DataSize])
-        clean = data is not None and data == b"\x00\x00\x07\xe8" + body
-        if expect_clean:
-            check(clean, f"{model}: reassembles to the id once plus 600 bytes",
+        if model == "id_every_chunk":
+            check(data == expect, f"{model}: reassembles to the id once plus 600 bytes",
                   f"{len(data) if data else 0} bytes")
         else:
-            check(clean, f"{model}: also reassembles cleanly", f"{len(data) if data else 0} bytes")
+            check(data == expect, f"{model}: 598 bytes, four lost per continuation chunk, as the vendor DLL delivers",
+                  f"{len(data) if data else 0} bytes")
         d.PassThruClose(dev)
         stop.set()
         time.sleep(0.05)
@@ -720,7 +719,7 @@ def s_chunking_models():
 
 SCENARIOS = [s_happy_path, s_multiframe, s_no_ack, s_backlog, s_dropped_reply,
              s_disconnect, s_truncated, s_garbage, s_loopback,
-             s_periodic_pacing, s_consumer_rule, s_tp20, s_tp20_silent_module,
+             s_periodic_keepalive, s_consumer_rule, s_tp20, s_tp20_silent_module,
              s_frame_pad, s_capture_tool_pads,
              s_chunking_models]
 

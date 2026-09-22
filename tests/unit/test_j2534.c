@@ -10,6 +10,7 @@
 #include "op_device.h"
 #include "mock_transport.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
@@ -109,16 +110,18 @@ static void connect_and_channels(void)
     shut(dev);
 }
 
-/* Defect 1: these returned STATUS_NOERROR while doing nothing. A caller using
- * StartPeriodicMsg as a TesterPresent keep-alive would have got silence. */
-static void periodic_is_real(void)
+/* Periodic messages run in the firmware, in the form Tactrix's DLL sends:
+ * `atm<ch> <interval_us> 0 <txflags> <len>` + payload, answered `arm<ch> <id>`,
+ * stopped with `atn<ch> <id>`. */
+static void periodic_is_firmware_scheduled(void)
 {
-    J_U32 dev = open_device(), ch = 0, id = 0;
+    J_U32 dev = open_device(), ch = 0, id = 99;
     PASSTHRU_MSG m;
 
     PassThruConnect(dev, ISO15765, 0, 500000, &ch);
     memset(&m, 0, sizeof m);
     m.ProtocolID = ISO15765;
+    m.TxFlags    = ISO15765_FRAME_PAD;
     m.DataSize   = 6;
     m.Data[3] = 0xE0; m.Data[4] = 0x3E; m.Data[5] = 0x00;
 
@@ -127,87 +130,40 @@ static void periodic_is_real(void)
     CHECK_EQ(PassThruStartPeriodicMsg(ch, &m, &id, 70000),
              ERR_INVALID_TIME_INTERVAL, "interval above the J2534 maximum");
 
-    CHECK_EQ(PassThruStartPeriodicMsg(ch, &m, &id, 10), STATUS_NOERROR,
+    mock_clear_tx();
+    CHECK_EQ(PassThruStartPeriodicMsg(ch, &m, &id, 100), STATUS_NOERROR,
              "StartPeriodicMsg accepted");
-    CHECK(id != 0, "StartPeriodicMsg returns a usable id");
+    CHECK(tx_contains("atm6 100000 0 64 6 "),
+          "the firmware is asked in microseconds, with the message's TxFlags");
+    CHECK_EQ(id, 0, "the id is the one the device handed out");
 
     mock_clear_tx();
-    usleep(120000);              /* ~12 intervals */
-    CHECK(tx_contains("att6 6 "), "periodic message actually transmits");
+    usleep(50000);
+    CHECK(!tx_contains("att6"), "nothing is transmitted from the host");
 
     CHECK_EQ(PassThruStopPeriodicMsg(ch, id + 100), ERR_INVALID_MSG_ID,
              "StopPeriodicMsg with a bad id");
+    CHECK(!tx_contains("atn6"), "and the bad id never reaches the device");
     CHECK_EQ(PassThruStopPeriodicMsg(ch, id), STATUS_NOERROR, "StopPeriodicMsg");
-
-    mock_clear_tx();
-    usleep(80000);
-    CHECK(!tx_contains("att6 6 "), "stopped periodic message stays stopped");
+    CHECK(tx_contains("atn6 0 "), "the firmware is told to stop it");
+    CHECK_EQ(PassThruStopPeriodicMsg(ch, id), ERR_INVALID_MSG_ID,
+             "a stopped message is forgotten");
     shut(dev);
 }
 
-/*
- * Stopping a periodic message must mean nothing more goes on the bus. The
- * scheduler releases the periodic lock before transmitting — it has to, or it
- * would take the device command lock in the opposite order to everyone else —
- * so a frame can already be on the wire when the stop arrives. Returning then
- * would tell a caller the bus is quiet while a frame is still going out, and
- * the vehicle tooling's "nothing transmits after Stop" guarantee rests on this.
- * With a slow transmit the race is deterministic rather than a rare flake.
- */
-static void periodic_stop_waits_for_inflight(void)
-{
-    J_U32 dev = open_device(), ch = 0, id = 0;
-    PASSTHRU_MSG m;
-    struct timeval t0, t1;
-    long ms;
-
-    PassThruConnect(dev, ISO15765, 0, 500000, &ch);
-    memset(&m, 0, sizeof m);
-    m.ProtocolID = ISO15765;
-    m.DataSize   = 6;
-    m.Data[3] = 0xE0; m.Data[4] = 0x3E; m.Data[5] = 0x00;
-
-    mock_delay_transmits(250);
-    CHECK_EQ(PassThruStartPeriodicMsg(ch, &m, &id, 10), STATUS_NOERROR,
-             "periodic started");
-    usleep(60000);                       /* a transmit is now on the wire */
-
-    gettimeofday(&t0, NULL);
-    CHECK_EQ(PassThruStopPeriodicMsg(ch, id), STATUS_NOERROR, "StopPeriodicMsg");
-    gettimeofday(&t1, NULL);
-    ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_usec - t0.tv_usec) / 1000L;
-    CHECK(ms >= 50, "Stop waits out the frame already on the wire");
-
-    mock_clear_tx();
-    usleep(150000);
-    CHECK(!tx_contains("att6 6 "), "and nothing transmits after Stop returns");
-    mock_delay_transmits(0);
-    shut(dev);
-}
-
-/* Defect 1 again: a stub must say so, and must not energise a pin by accident. */
 static void programming_voltage(void)
 {
     J_U32 dev = open_device();
 
-    unsetenv("OPENPORT_ENABLE_PROG_VOLTAGE");
-    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 12, 17000), ERR_NOT_SUPPORTED,
-             "applying voltage is refused unless enabled");
-    CHECK(!tx_contains("atv 12 17000"), "refused voltage never reaches the wire");
-
-    /* Turning it off is always permitted: a caller must be able to make the
-     * pin safe without first opting in to making it live. */
-    mock_clear_tx();
-    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 12, 0xFFFFFFFFUL),
-             STATUS_NOERROR, "VOLTAGE_OFF is always allowed");
-    CHECK(tx_contains("atv 12 -1 "), "VOLTAGE_OFF reaches the wire signed, as the vendor sends it");
-
-    setenv("OPENPORT_ENABLE_PROG_VOLTAGE", "1", 1);
     mock_clear_tx();
     CHECK_EQ(PassThruSetProgrammingVoltage(dev, 12, 17000), STATUS_NOERROR,
-             "enabled voltage is applied");
-    CHECK(tx_contains("atv 12 17000 "), "enabled voltage reaches the wire");
-    unsetenv("OPENPORT_ENABLE_PROG_VOLTAGE");
+             "a voltage is applied");
+    CHECK(tx_contains("atv 12 17000 "), "and reaches the wire");
+
+    mock_clear_tx();
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 12, 0xFFFFFFFFUL),
+             STATUS_NOERROR, "VOLTAGE_OFF");
+    CHECK(tx_contains("atv 12 -1 "), "VOLTAGE_OFF reaches the wire signed, as the vendor sends it");
     shut(dev);
 }
 
@@ -217,7 +173,6 @@ static void kline_pins_are_not_grounded_under_a_channel(void)
 {
     J_U32 dev = open_device(), ch = 0, ch2 = 0;
 
-    setenv("OPENPORT_ENABLE_PROG_VOLTAGE", "1", 1);
     CHECK_EQ(PassThruConnect(dev, ISO9141, 0, 10400, &ch), STATUS_NOERROR, "connect ISO9141");
     mock_clear_tx();
     CHECK_EQ(PassThruSetProgrammingVoltage(dev, 7, SHORT_TO_GROUND), ERR_CHANNEL_IN_USE,
@@ -242,11 +197,10 @@ static void kline_pins_are_not_grounded_under_a_channel(void)
     PassThruDisconnect(ch);
     CHECK_EQ(PassThruConnect(dev, ISO9141_L, 0, 10400, &ch), STATUS_NOERROR,
              "and so is an L-line channel, which does not use K");
-    unsetenv("OPENPORT_ENABLE_PROG_VOLTAGE");
     shut(dev);
 }
 
-/* J2534-1 requires ten periodic messages per channel. */
+/* J2534-1 requires ten periodic messages per channel; the firmware holds ten. */
 static void periodic_limit_is_per_channel(void)
 {
     J_U32 dev = open_device(), can = 0, iso = 0, id = 0;
@@ -262,43 +216,49 @@ static void periodic_limit_is_per_channel(void)
     for (i = 0; i < 10; i++)
         CHECK_EQ(PassThruStartPeriodicMsg(can, &m, &id, 1000), STATUS_NOERROR,
                  "ten periodic messages on one channel");
+    mock_clear_tx();
     CHECK_EQ(PassThruStartPeriodicMsg(can, &m, &id, 1000), ERR_EXCEEDED_LIMIT,
              "the eleventh is refused");
+    CHECK(!tx_contains("atm"), "without asking the device");
     m.ProtocolID = ISO15765;
     m.DataSize = 6;
     CHECK_EQ(PassThruStartPeriodicMsg(iso, &m, &id, 1000), STATUS_NOERROR,
              "another channel has its own ten");
     CHECK_EQ(PassThruStopPeriodicMsg(can, id), ERR_INVALID_MSG_ID,
              "and its id does not stop a message on the first channel");
+    mock_clear_tx();
     CHECK_EQ(PassThruIoctl(can, CLEAR_PERIODIC_MSGS, NULL, NULL), STATUS_NOERROR, "clear");
+    CHECK(tx_contains("atn5 0 ") && tx_contains("atn5 9 "), "every id on the channel is stopped");
     CHECK_EQ(PassThruIoctl(iso, CLEAR_PERIODIC_MSGS, NULL, NULL), STATUS_NOERROR, "clear");
+    CHECK(tx_contains("atn6 10 "), "on the other channel too");
+    CHECK_EQ(PassThruStartPeriodicMsg(can, &m, &id, 1000), STATUS_NOERROR,
+             "and the channel has room again");
     shut(dev);
 }
 
-static void sniff_mode_is_refused(void)
+/* Tactrix's own canlogger connects with SNIFF_MODE | CAN_ID_BOTH; the flag
+ * goes to the firmware as the vendor DLL sends it. */
+static void sniff_mode_is_passed_through(void)
 {
     J_U32 dev = open_device(), ch = 0;
 
     mock_clear_tx();
-    CHECK_EQ(PassThruConnect(dev, CAN, SNIFF_MODE, 500000, &ch), ERR_NOT_SUPPORTED,
-             "SNIFF_MODE is refused: the cable acknowledges regardless");
-    CHECK(!tx_contains("ato"), "and nothing is opened");
-    CHECK_EQ(PassThruConnect(dev, CAN, 0, 500000, &ch), STATUS_NOERROR,
-             "a normal channel still opens");
+    CHECK_EQ(PassThruConnect(dev, CAN, SNIFF_MODE | CAN_ID_BOTH, 500000, &ch), STATUS_NOERROR,
+             "SNIFF_MODE opens the channel");
+    CHECK(tx_contains("ato5 268437504 500000 0 "), "and the flags reach the firmware");
     shut(dev);
 }
 
 /* Every voltage pin shares one supply, so a second pin would silently move
- * the first pin's voltage. */
+ * the first pin's voltage: J2534-1 7.2.11 says one pin at a time. */
 static void one_pin_carries_voltage(void)
 {
     J_U32 dev = open_device();
 
-    setenv("OPENPORT_ENABLE_PROG_VOLTAGE", "1", 1);
     CHECK_EQ(PassThruSetProgrammingVoltage(dev, 13, 5000), STATUS_NOERROR, "5 V on pin 13");
     mock_clear_tx();
-    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 12, 9000), ERR_EXCEEDED_LIMIT,
-             "a second pin is refused");
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 12, 9000), ERR_PIN_INVALID,
+             "a second pin is refused with the code Figure 22 names");
     CHECK(!tx_contains("atv"), "and never reaches the wire");
     CHECK_EQ(PassThruSetProgrammingVoltage(dev, 13, 8000), STATUS_NOERROR,
              "the same pin can be changed");
@@ -307,14 +267,11 @@ static void one_pin_carries_voltage(void)
     CHECK_EQ(PassThruSetProgrammingVoltage(dev, 13, VOLTAGE_OFF), STATUS_NOERROR, "pin 13 off");
     CHECK_EQ(PassThruSetProgrammingVoltage(dev, 12, 9000), STATUS_NOERROR,
              "then another pin may take the supply");
-    unsetenv("OPENPORT_ENABLE_PROG_VOLTAGE");
     shut(dev);
 
     dev = open_device();
-    setenv("OPENPORT_ENABLE_PROG_VOLTAGE", "1", 1);
     CHECK_EQ(PassThruSetProgrammingVoltage(dev, 13, 5000), STATUS_NOERROR,
              "a reopened session starts with no pin powered");
-    unsetenv("OPENPORT_ENABLE_PROG_VOLTAGE");
     shut(dev);
 }
 
@@ -355,13 +312,11 @@ static void j2534_2_channels(void)
                  "a protocol with no firmware channel is refused");
     CHECK(!tx_contains("ato"), "and none of them reaches the wire");
 
-    setenv("OPENPORT_ENABLE_PROG_VOLTAGE", "1", 1);
     CHECK_EQ(PassThruConnect(dev, ISO9141_L, 0, 10400, &ch), STATUS_NOERROR, "ISO9141_L");
     CHECK_EQ(PassThruSetProgrammingVoltage(dev, 15, SHORT_TO_GROUND), ERR_CHANNEL_IN_USE,
              "L is not grounded under an L-line channel");
     CHECK_EQ(PassThruSetProgrammingVoltage(dev, 7, SHORT_TO_GROUND), STATUS_NOERROR,
              "K is free under it");
-    unsetenv("OPENPORT_ENABLE_PROG_VOLTAGE");
     shut(dev);
 }
 
@@ -434,17 +389,61 @@ static void transport_failures_propagate(void)
     shut(dev);
 }
 
+/* J2534-1 7.2.1: any function called before a successful PassThruOpen, or
+ * after PassThruClose, returns ERR_INVALID_DEVICE_ID. */
 static void device_absent(void)
 {
-    J_U32 dev = 0;
-    /* No device: PassThruOpen must return 8, and later calls must not crash. */
+    J_U32 dev = 0, n = 1;
+    PASSTHRU_MSG m;
     op_device_set_factory(NULL);
     mock_reset();
-    CHECK_EQ(PassThruClose(1), ERR_INVALID_DEVICE_ID, "Close with no device: invalid id, as the standard and the vendor DLL say");
+    memset(&m, 0, sizeof m);
+    CHECK_EQ(PassThruClose(1), ERR_INVALID_DEVICE_ID, "Close before open");
     CHECK_EQ(PassThruConnect(1, ISO15765, 0, 500000, &dev),
-             ERR_DEVICE_NOT_CONNECTED, "Connect with no device");
+             ERR_INVALID_DEVICE_ID, "Connect before open");
+    CHECK_EQ(PassThruDisconnect(6), ERR_INVALID_DEVICE_ID, "Disconnect before open");
+    CHECK_EQ(PassThruReadMsgs(6, &m, &n, 0), ERR_INVALID_DEVICE_ID, "ReadMsgs before open");
+    CHECK_EQ(PassThruWriteMsgs(6, &m, &n, 0), ERR_INVALID_DEVICE_ID, "WriteMsgs before open");
     CHECK_EQ(PassThruIoctl(1, READ_VBATT, NULL, &dev),
-             ERR_DEVICE_NOT_CONNECTED, "Ioctl with no device");
+             ERR_INVALID_DEVICE_ID, "Ioctl before open");
+    CHECK_EQ(PassThruSetProgrammingVoltage(1, 12, VOLTAGE_OFF),
+             ERR_INVALID_DEVICE_ID, "SetProgrammingVoltage before open");
+}
+
+struct blocked_read { J_U32 ch; long rc; J_U32 count; long ms; };
+
+static void *blocked_read_main(void *arg)
+{
+    struct blocked_read *b = (struct blocked_read *)arg;
+    PASSTHRU_MSG m;
+    struct timeval t0, t1;
+    b->count = 1;
+    gettimeofday(&t0, NULL);
+    b->rc = PassThruReadMsgs(b->ch, &m, &b->count, 5000);
+    gettimeofday(&t1, NULL);
+    b->ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_usec - t0.tv_usec) / 1000L;
+    return NULL;
+}
+
+/* A GUI application reads on one thread and closes from another. The read
+ * must return promptly, with the post-close code, instead of sleeping out its
+ * timeout on a device that no longer exists. */
+static void close_wakes_a_blocked_read(void)
+{
+    J_U32 dev = open_device();
+    struct blocked_read b;
+    pthread_t t;
+
+    b.ch = 0;
+    PassThruConnect(dev, ISO15765, 0, 500000, &b.ch);
+    pthread_create(&t, NULL, blocked_read_main, &b);
+    usleep(50000);
+    CHECK_EQ(PassThruClose(dev), STATUS_NOERROR, "Close while a read is blocked");
+    pthread_join(t, NULL);
+    CHECK_EQ(b.rc, ERR_INVALID_DEVICE_ID, "the read reports the device closed");
+    CHECK_EQ(b.count, 0, "with no messages");
+    CHECK(b.ms < 1000, "and returned at once, not after its 5 s timeout (%ld ms)", b.ms);
+    op_device_set_factory(NULL);
 }
 
 static void filters(void)
@@ -609,12 +608,13 @@ static void receive_path(void)
     CHECK_EQ(got[0].RxStatus, 0, "a complete message carries no indication bits");
 
     /* A segmented message: a START frame with the CAN id only announces it,
-     * then END-terminated frames carry the id again plus the data. The
-     * announcement is its own J2534 indication; the data is one message. */
+     * then END-terminated frames carry the id again plus the data, every
+     * chunk repeating the id. The announcement is its own J2534 indication;
+     * the data is one message with the id once. */
     {
         const uint8_t a[] = { 'a','r','6', 0x09, 0x80, 0,0,0x20,0x00, 0x00,0x00,0x07,0xE8 };
         const uint8_t b[] = { 'a','r','6', 0x0B, 0x00, 0,0,0x20,0x01, 0x00,0x00,0x07,0xE8, 0xAA,0xBB };
-        const uint8_t c[] = { 'a','r','6', 0x07, 0x40, 0,0,0x20,0x02, 0xCC,0xDD };
+        const uint8_t c[] = { 'a','r','6', 0x0B, 0x40, 0,0,0x20,0x02, 0x00,0x00,0x07,0xE8, 0xCC,0xDD };
         mock_push(a, sizeof a);
         mock_push(b, sizeof b);
         mock_push(c, sizeof c);
@@ -660,10 +660,10 @@ static void receive_path(void)
              "transmit indication then reply");
     CHECK_EQ(count, 2, "two messages");
     CHECK_EQ(got[0].RxStatus, TX_MSG_TYPE | TX_DONE, "TX_DONE indication");
-    /* The device sends the CAN id with a transmit indication; J2534 Table 13
-     * says a TxDone carries no data, and commands here are serialised so the
-     * id adds no correlation the caller lacks. It stays in the log. */
-    CHECK_EQ(got[0].DataSize, 0, "a TxDone indication carries no data");
+    /* J2534-1 section 8.6: DataSize 4, Data the CAN id of the message just
+     * sent, ExtraDataIndex zero. The vendor DLL reports it the same way. */
+    CHECK_EQ(got[0].DataSize, 4, "a TxDone indication carries the CAN id");
+    CHECK_EQ(got[0].Data[3], 0xE0, "of the message just sent");
     CHECK_EQ(got[0].ExtraDataIndex, 0, "and reports ExtraDataIndex zero");
     CHECK_EQ(got[1].RxStatus, 0, "the reply is a plain received message");
     CHECK_EQ(got[1].DataSize, 6, "the reply is not contaminated by the indication");
@@ -1051,6 +1051,12 @@ static void sequence_numbers_are_matched(void)
     CHECK_EQ(PassThruWriteMsgs(ch, &m, &n, 0), STATUS_NOERROR, "WriteMsgs with Timeout 0 returns at once");
     CHECK_EQ(n, 1, "and reports the message as queued");
     CHECK(tx_contains("att6 6 0 1000000 "), "the transmit went out numbered, with the 1 s budget a zero timeout maps to");
+    mock_clear_tx();
+    n = 1;
+    CHECK_EQ(PassThruWriteMsgs(ch, &m, &n, 0xFFFFFFFFUL), ERR_TIMEOUT,
+             "a huge Timeout still reports the device's rejection");
+    CHECK(tx_contains("att6 6 0 4294967295 "),
+          "and the microsecond budget saturates instead of wrapping");
     CHECK_EQ(PassThruDisconnect(ch), STATUS_NOERROR,
              "Disconnect gets its own reply, not the transmit's late failure");
     CHECK_EQ(PassThruClose(dev), STATUS_NOERROR, "Close");
@@ -1116,13 +1122,13 @@ void test_j2534(void)
     kline_init_failure();
     timeouts_are_honoured();
     transport_failures_propagate();
-    periodic_is_real();
-    periodic_stop_waits_for_inflight();
+    close_wakes_a_blocked_read();
+    periodic_is_firmware_scheduled();
     programming_voltage();
     kline_pins_are_not_grounded_under_a_channel();
     one_pin_carries_voltage();
     periodic_limit_is_per_channel();
-    sniff_mode_is_refused();
+    sniff_mode_is_passed_through();
     j2534_2_channels();
     late_reply_is_not_reused();
     write_timeout_is_a_call_budget();
