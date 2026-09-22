@@ -111,10 +111,17 @@ examples/op_iso15765: examples/op_iso15765.c $(SHLIB)
 # Path to the reference libj2534.dylib to compare against: make differential OLD_DRIVER=...
 OLD_DRIVER ?=
 
-diff-tools: tools/usbtap.dylib tests/differential/diff_runner
-# The tap is injected into the runner, so both must be the same slice.
-# macOS defaults some executables to arm64e; pin both to arm64.
+# The tap is injected into the runner, so both must be the same slice; macOS
+# defaults some executables to arm64e. -arch is a Darwin flag, and the
+# sanitizer and fuzz targets below carry it too, so elsewhere it stays empty.
+ifeq ($(UNAME_S),Darwin)
 DIFF_ARCH ?= -arch $(UNAME_M)
+diff-tools: tools/usbtap.dylib tests/differential/diff_runner
+else
+DIFF_ARCH ?=
+diff-tools:
+	@echo "diff-tools: usbtap is a DYLD_INSERT_LIBRARIES interposer and needs macOS" >&2; exit 1
+endif
 tools/usbtap.dylib: tools/usbtap/usbtap.c
 	$(CC) $(DIFF_ARCH) -dynamiclib $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $< \
 	      $(LDLIBS) -o $@

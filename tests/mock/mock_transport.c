@@ -9,7 +9,7 @@
 #include <sys/time.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
+#include <time.h>
 
 #define MOCK_CAP 65536
 
@@ -353,7 +353,12 @@ static void openport_responder(const char *line, size_t len,
         pthread_mutex_lock(&g_lock);
         d = g_tx_delay_ms;
         pthread_mutex_unlock(&g_lock);
-        if (d) usleep(d * 1000u);
+        if (d) {
+            struct timespec ts;
+            ts.tv_sec  = (time_t)(d / 1000u);
+            ts.tv_nsec = (long)(d % 1000u) * 1000000L;
+            nanosleep(&ts, NULL);
+        }
         mock_push_reply("aro");
     } else if (strncmp(buf, "atv", 3) == 0) {
         mock_push_reply("aro");

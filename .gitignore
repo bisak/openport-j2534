@@ -14,3 +14,4 @@ examples/op_iso15765
 tools/ab-official/out/
 tools/ab-official/j2534_trace
 tools/ab-official/j2534_trace.exe
+car-session-*/

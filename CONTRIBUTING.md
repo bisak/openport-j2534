@@ -9,8 +9,8 @@ make check-all  # sanitizers, fuzzing and simulator scenarios as well
 ```
 
 A change is ready when `make test` passes with no hardware, `make CFLAGS="-O2 -g -Werror"` builds
-clean, and any behaviour that was measured on a cable or a vehicle is written down in
-`docs/PROTOCOL.md` with its evidence level.
+clean on macOS and on Linux (a container is enough), and any behaviour that was measured on a
+cable or a vehicle is written down in `docs/PROTOCOL.md` with its evidence level.
 
 ## What helps most
 

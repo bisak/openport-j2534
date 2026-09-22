@@ -138,7 +138,7 @@ static void periodic_is_firmware_scheduled(void)
     CHECK_EQ(id, 0, "the id is the one the device handed out");
 
     mock_clear_tx();
-    usleep(50000);
+    sleep_us(50000);
     CHECK(!tx_contains("att6"), "nothing is transmitted from the host");
 
     CHECK_EQ(PassThruStopPeriodicMsg(ch, id + 100), ERR_INVALID_MSG_ID,
@@ -437,7 +437,7 @@ static void close_wakes_a_blocked_read(void)
     b.ch = 0;
     PassThruConnect(dev, ISO15765, 0, 500000, &b.ch);
     pthread_create(&t, NULL, blocked_read_main, &b);
-    usleep(50000);
+    sleep_us(50000);
     CHECK_EQ(PassThruClose(dev), STATUS_NOERROR, "Close while a read is blocked");
     pthread_join(t, NULL);
     CHECK_EQ(b.rc, ERR_INVALID_DEVICE_ID, "the read reports the device closed");
@@ -861,7 +861,7 @@ static void late_reply_is_not_reused(void)
 
     /* The device answers late, after the caller has already given up. */
     mock_push_reply("are 9");
-    usleep(120000);
+    sleep_us(120000);
 
     /* The next command must get its own reply, not the abandoned one. */
     mock_install_openport_responder();
@@ -946,9 +946,9 @@ static void queue_overrun_is_reported(void)
         uint8_t f[] = { 'a','r','6', 0x0B, 0xC0, 0,0,0x10,(uint8_t)i,
                         0x00,0x00,0x07,0xE8, 0x7E, 0x00 };
         mock_push(f, sizeof f);
-        if (i % 2000 == 1999) usleep(20000);   /* the mock's own buffer is 64 KB */
+        if (i % 2000 == 1999) sleep_us(20000);   /* the mock's own buffer is 64 KB */
     }
-    usleep(300000);                        /* let the reader drain the pipe */
+    sleep_us(300000);                        /* let the reader drain the pipe */
 
     for (i = 0; i < 4 && !saw_overflow; i++) {
         count = 8;
@@ -981,9 +981,9 @@ static void large_backlog_is_kept_in_order(void)
             uint8_t f[] = { 'a','r','5', 0x0B, 0x00, 0,0,0,0,
                             0x00,0x00,0x03,0x59, (uint8_t)(i >> 8), (uint8_t)i };
             mock_push(f, sizeof f);
-            if (i % 3000 == 2999) usleep(30000);   /* the mock's own buffer is 64 KB */
+            if (i % 3000 == 2999) sleep_us(30000);   /* the mock's own buffer is 64 KB */
         }
-        usleep(300000);
+        sleep_us(300000);
         total = 0; in_order = 1;
         do {
             count = 256;

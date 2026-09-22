@@ -3,8 +3,19 @@
 #define TEST_H
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 extern int g_tests, g_fails;
+
+/* Sub-second sleeps for timing tests. The build selects POSIX.1-2008, which
+ * has nanosleep and not usleep. */
+static inline void sleep_us(unsigned long us)
+{
+    struct timespec ts;
+    ts.tv_sec  = (time_t)(us / 1000000UL);
+    ts.tv_nsec = (long)(us % 1000000UL) * 1000L;
+    nanosleep(&ts, NULL);
+}
 
 #define CHECK(cond, ...) do {                                   \
     g_tests++;                                                  \
