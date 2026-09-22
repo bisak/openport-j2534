@@ -65,6 +65,18 @@ boot arguments. Find the interface by walking configurations, interfaces and
 altsettings for one exposing both a bulk IN and a bulk OUT rather than
 hardcoding 1.
 
+### Claiming the interface on Linux **[P]**
+
+Linux binds `cdc_acm` to the comm interface, and `cdc_acm` claims the data
+interface itself. Claiming the data interface from libusb needs its kernel
+driver detached, and detaching either interface tears the whole ACM device
+down, `/dev/ttyACM*` included; only re-probing the comm interface brings it
+back. A driver that detaches must therefore reattach at close, comm interface
+first, or the cable is unusable as a serial port until it is replugged. This
+driver records every interface with a kernel driver at open and reattaches
+them at close. Reported on Linux hardware (2026-09-21) and consistent with
+`cdc_acm`'s design; this project's own cable has only been on macOS.
+
 ---
 
 ## 2. Framing **[V]**
@@ -696,6 +708,7 @@ the bench), so the failure is the car, not the driver.
 | Whether the firmware drives L on channels 3 and 4 | a scope on pin 15 during a five-baud init |
 | How extended addressing (`ISO15765_ADDR_TYPE`) is marked on receive | an ECU that uses it |
 | Whether filter ids are reused after `atk` (the driver tracks them in a 32-bit mask) | forty start/stop cycles over the CDC node |
+| The reattach at close on Linux (§1), as this driver does it | `examples/op_smoke` twice on a Linux machine, then `ls /dev/ttyACM*` |
 | `atx` and `atp` | unknown; neither is sent by the vendor DLL |
 
 Settled by measurement, for anyone checking a claim: the DLL's five-argument

@@ -12,12 +12,13 @@ standard and a wire protocol established by observing the cable and by running
 Tactrix's own Windows DLL against the same cable. The protocol is written down
 in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
-- No `sudo`, no kernel extensions, no boot arguments.
+- No `sudo` to run, no kernel extensions, no boot arguments.
 - Every USB transfer is bounded; a wedged cable returns `ERR_TIMEOUT`, never a hang.
 - Every result is honest: a transmit the cable rejected is reported as rejected.
 - Byte-for-byte parity with Tactrix's own driver on the wire, verified with
   the vendor DLL running against the same cable ([`docs/AB-OFFICIAL.md`](docs/AB-OFFICIAL.md)).
-- Hardware-free test suite: unit tests, fuzzing, sanitizers, a protocol simulator.
+- Hardware-free test suite: unit tests, fuzzing, sanitizers, a protocol
+  simulator. Runs on macOS and Linux.
 
 GPL-3.0-or-later. Not affiliated with or endorsed by Tactrix.
 
@@ -58,6 +59,26 @@ op_probe
 
 It should report `0403:cc4d`. If the cable enumerates as a disk instead,
 remove the microSD card and re-plug.
+
+### Linux
+
+The build and the whole hardware-free suite are verified on Ubuntu 24.04;
+`make install` puts `libj2534.so` under `/usr/local`. Two things Linux needs
+that macOS does not:
+
+- **Permission to open the cable.** Install a udev rule once, then re-plug:
+
+  ```
+  # /etc/udev/rules.d/70-openport.rules
+  SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="cc4d", MODE="0666"
+  ```
+
+  The serial transport (`OPENPORT_DEVICE=/dev/ttyACM0`) needs membership of
+  the group that owns the node instead, usually `dialout`.
+- **The cable is handed back to the kernel on close.** Linux binds `cdc_acm`
+  to the cable and claiming the USB interface detaches it, which takes
+  `/dev/ttyACM*` away. `PassThruClose` reattaches the driver, so the serial
+  node returns a moment after the library lets go.
 
 ## Use
 
@@ -217,7 +238,7 @@ include/j2534/j2534.h   the standard API, plus Tactrix's own constants
 src/op_proto.c          wire codec: pure, no I/O, fully unit-tested
 src/op_transport.h      byte-pipe interface (a second device plugs in here)
 src/op_usb.c            libusb bulk transport
-src/op_serial.c         CDC-ACM transport (OPENPORT_DEVICE=/dev/cu.usbmodem...)
+src/op_serial.c         CDC-ACM transport (OPENPORT_DEVICE=/dev/cu.usbmodem... or /dev/ttyACM0)
 src/op_device.c         channels, reassembly, reader thread, reply matching
 src/op_j2534.c          the fourteen entry points
 examples/               op_smoke, op_iso15765, op_kline: end-to-end checks on a cable
@@ -237,12 +258,13 @@ docs/                   PROTOCOL, TESTING, DIFFERENTIAL, AB-OFFICIAL, CAR-SESSIO
 ```bash
 make test                                      # unit tests and golden traces, no hardware
 make check-all                                 # + sanitizers, fuzzing, simulator scenarios
-make differential OLD_DRIVER=/path/to/libj2534.dylib   # A/B vs another driver
+make differential OLD_DRIVER=/path/to/libj2534.dylib   # A/B vs another driver (macOS)
 make ab-official AB_DLL=/path/to/op20pt32.dll  # A/B vs the vendor DLL (Docker)
 ./examples/op_smoke                            # end to end, cable required
 ```
 
-See [`docs/TESTING.md`](docs/TESTING.md) for what each layer proves.
+The first two run on macOS and Linux. See [`docs/TESTING.md`](docs/TESTING.md)
+for what each layer proves.
 
 ## Safety
 

@@ -33,7 +33,8 @@ the ACK peer, and beat the car everywhere else.
 | 7. Two-node bench | cable + peer | The ACK peer, real bus timing |
 | 8. Vehicle | car | Confirmation only |
 
-Layers 1–5 need no hardware whatsoever and run in CI.
+Layers 1–5 need no hardware whatsoever, and run on macOS and Linux alike; an
+Ubuntu container is enough (`make check-all`).
 
 ---
 
@@ -192,7 +193,7 @@ ECU. See `docs/AB-OFFICIAL.md`.
 ## 6. Differential against the prior driver
 
 ```bash
-make differential DIFF_ARGS=--hardware
+make differential DIFF_ARGS=--hardware      # macOS: the tap is a DYLD interposer
 ```
 
 See `docs/DIFFERENTIAL.md`.

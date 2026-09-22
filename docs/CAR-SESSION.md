@@ -3,6 +3,12 @@
 One session, everything captured, nothing risked. This is **confirmation**, not
 qualification: no claim in `docs/PROTOCOL.md` and nothing in CI depends on it.
 
+**Status.** Run on 2026-09-13 on the Audi below (raw CAN and TP2.0 worked, the
+K-line answered nothing) and on a 2012 VW Caddy (ISO15765). What each settled
+is in `PROTOCOL.md` §7 and §11; the table at the end says which questions are
+closed. The session that still matters is one on a vehicle that answers on
+K-line, or a bench OBD simulator that does (`PROTOCOL.md` §12).
+
 ## Which car
 
 Recommended: **the 2009 Audi 1.9 TDI (EDC16C34)**.
@@ -190,23 +196,22 @@ leaves the most valuable data captured.
 
 ## What this closes
 
-| Question | Section |
-|---|---|
-| Received-message framing with real payload | `q0`, `q1` |
-| **K-line frame layout — the one parser fork** | `q2` (needs `--kline`; four init variants: EOBD 0x33 five-baud and fast, VAG 0x01 five-baud and fast; the `ary` init replies settle the `aty` command form too) |
-| Is `att`'s third argument TxFlags, and is the DLL's five-argument form accepted? Does its timeout argument drop a late reply? | `q3` |
-| **Chunking of a reply longer than 250 bytes** (id repeated per chunk or not) | opt-in `--long-read ADDR`; not on this ECU (memory map unknown) |
-| Does a PASS filter on ISO15765 still reassemble? | `q1` |
-| **Transmit echo shape** with LOOPBACK=1 | `q9` |
-| **Raw CAN frame format** (protocol 5) and what traffic reaches the port; does SNIFF_MODE open | `q10` (receive only) |
-| Which configuration ids the firmware knows, and their defaults, on CAN and K-line | `q11` |
-| The driver's own K-line path end to end (init ioctl, write, read) | `car-session.sh` step 7, `examples/op_kline` |
-| **The EDC16 flash counters**, a value the owner already knows | `--tp20` (VAG needs TP2.0, not ISO15765); `--allow-diag-session` if the ECU wants `10 89` first |
-| `atx` (`atm` and `atw` are known: periodic message and five-baud init) | `q5` (bench only, `--unknown-verbs`) |
-| Two-digit protocol numbers, and the DLL's five-argument `ato` | `q6` |
-| Pin 16 reads battery voltage | `q7` |
-| How the firmware reports a silent bus | `q8` |
-| Differential vs a reference driver, live | `car-session.sh` step 5 (`OLD_DRIVER=...`) |
+| Question | Section | Status |
+|---|---|---|
+| Received-message framing with real payload | `q0`, `q1` | closed on the Caddy (`PROTOCOL.md` §7) |
+| **K-line frame layout** | `q2` (needs `--kline`; four init variants: EOBD 0x33 five-baud and fast, VAG 0x01 five-baud and fast; the init replies settle the `arw`/`ary` shapes too) | **open**: no K-line responder yet |
+| Is `att`'s third argument TxFlags, and is the DLL's five-argument form accepted? | `q3` | closed (§4) |
+| **Chunking of a reply longer than 250 bytes** | opt-in `--long-read ADDR`; not on this ECU (memory map unknown) | **open**; the vendor DLL's reading is implemented (§7.6) |
+| **Transmit echo shape** with LOOPBACK=1 on ISO15765 | `q9` | **open** |
+| **Raw CAN frame format** and what traffic reaches the port; does SNIFF_MODE open | `q10` (receive only) | closed (§7.8, §10) |
+| Which configuration ids the firmware knows, and their defaults | `q11` | closed (§8) |
+| The driver's own K-line path end to end (init ioctl, write, read) | `car-session.sh` step 7, `examples/op_kline` | **open**: no K-line responder yet |
+| VW TP2.0 over raw CAN, and the EDC16 flash counters | `--tp20`; `--allow-diag-session` if the ECU wants `10 89` first | TP2.0 works (§11) |
+| `atx` (`atm` and `atw` are known: periodic message and five-baud init) | `q5` (bench only, `--unknown-verbs`) | open, unimportant |
+| Two-digit protocol numbers, and the DLL's five-argument `ato` | `q6` | closed (§5, §12) |
+| Pin 16 reads battery voltage | `q7` | closed (§8) |
+| How the firmware reports a silent bus | `q8` | closed (§6) |
+| Differential vs a reference driver, live | `car-session.sh` step 5 (`OLD_DRIVER=...`, macOS) | not run live; the live comparisons were made against the vendor DLL (`AB-OFFICIAL.md`) |
 
 ## Reading the results
 

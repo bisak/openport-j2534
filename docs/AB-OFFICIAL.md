@@ -2,9 +2,9 @@
 
 Tactrix ships one consumer of the cable's firmware: `op20pt32.dll`, a 32-bit
 Windows library, packed with a commercial protector. It is the authority on
-what the firmware accepts and how its replies are meant to be read, and until
-now every claim about that in `PROTOCOL.md` came from sweeping the cable or
-from third parties. This harness runs the DLL itself, on this Mac, against the
+what the firmware accepts and how its replies are meant to be read; before
+this harness existed, every claim about that in `PROTOCOL.md` came from
+sweeping the cable or from third parties. This harness runs the DLL itself, on this Mac, against the
 same simulator and the same cable as `libj2534.dylib`, drives both through one
 scripted sequence, and diffs what they returned and what they put on the wire.
 
@@ -90,21 +90,21 @@ of this harness is what confirms it.
   which always pass 1000 ms or 0; the replay of the reflash tool, which passes
   5000 ms for its driver-window transfer, sent `5000000`. It is the caller's
   `WriteMsgs` Timeout in microseconds, with 1 000 000 substituted for 0: the
-  firmware's budget for getting the message onto the bus. This driver had
-  been sending none, leaving the firmware's ~1 s default in force even when
-  the tool allowed 5 s for a 257-byte transfer paced by a slow ECU. It sends
-  the argument now. On the cable an unnumbered `att` gets **no reply at all**, not
+  firmware's budget for getting the message onto the bus; without it the
+  firmware's ~1 s default would cut a 257-byte transfer paced by a slow ECU
+  short of the 5 s the tool allowed. This driver sends the same argument. On
+  the cable an unnumbered `att` gets **no reply at all**, not
   even `are 9` when the bus never acknowledges, and while the firmware is
   still trying to send, the next command (`atc6`) is not answered for about
   a second, which is the DLL's `PassThruDisconnect` returning `ERR_TIMEOUT`
   right after. The numbered form on a dead bus answers `are 9 <seq>` after
   1.0 s. J2534 says `Timeout=0` means queue and return; the vendor does that
-  (`rc=0`, one message sent). This driver did not, and now does: the write
-  goes out numbered and unwaited, and its reply is dropped by number when it
-  arrives.
+  (`rc=0`, one message sent). So does this driver, with one difference: its
+  write goes out numbered and unwaited, so the late reply is recognised and
+  dropped instead of being mistaken for the next command's answer.
 - **`CLEAR_RX_BUFFER` touches the wire not at all** in the vendor DLL: it
-  clears the DLL's own receive queue. This driver used to send `atl` as well,
-  whose device-side effect is unmeasured; it no longer does.
+  clears the DLL's own receive queue. This driver does the same; `atl` exists
+  on the cable but what it clears is unmeasured.
 - **`atm` is the firmware's periodic message.** `PassThruStartPeriodicMsg`
   (100 ms) sends `atm6 100000 0 64 6 <seq>` + payload: interval in
   microseconds, a 0, TxFlags, length, sequence. `PassThruStopPeriodicMsg` sends
@@ -112,8 +112,8 @@ of this harness is what confirms it.
   `arm6 1 <seq>`, and the facility was measured against a bench ECU
   (`PROTOCOL.md` §10). This driver sends the same commands.
 - **`SetProgrammingVoltage(pin, VOLTAGE_OFF)` is sent as `atv 12 -1`**, the
-  value printed signed. This driver sends it the same way since 2026-09-16;
-  the firmware accepts both forms.
+  value printed signed. This driver sends it the same way; the firmware
+  accepts both forms.
 - **Open is `ati`, `ata`; close is `atz`.** `PassThruReadVersion` answers from
   the `ati` reply cached at open and touches the wire not at all.
   `READ_VBATT` is `atr 16 <seq>`.
@@ -133,14 +133,13 @@ of this harness is what confirms it.
   which is what J2534 Table 72 asks for.
 
 - **Five-baud init is `atw<ch> <address>`**, the address in decimal on the
-  command line and nothing after it (`atw3 51` for 0x33). This driver sent
-  `atw3 1` plus the address as a raw byte, so the firmware initialised
-  address 1 every time and then misread the byte, which on the bench wedges
-  the following disconnect. That is the most likely reason the Audi's live
-  K-line never answered in June. Fixed; fast init already matched. The vendor
-  also opens ISO9141 with a trailing value that varies from run to run (3 on
-  the bench, 5 on the car: the DLL's handle of the ISO14230 channel it had
-  just closed), which is its own bookkeeping and not copied.
+  command line and nothing after it (`atw3 51` for 0x33). The form an earlier
+  reading had, `atw3 1` plus the address as a raw byte, makes the firmware
+  initialise address 1 and then misread the byte as the next command, which
+  wedges the following disconnect. This driver sends the vendor's form. The
+  vendor also opens ISO9141 with a trailing value that varies from run to run
+  (3 on the bench, 5 on the car: the DLL's handle of the ISO14230 channel it
+  had just closed), which is its own bookkeeping and not copied.
 - **On the Audi (2009 1.9 TDI, EDC16), both drivers fail every K-line init
   identically**: fast init to 0x33 and 0x01, five-baud to 0x33, 0x01, 0x10,
   0x17, 0x19, 0x25, 0x08 and 0x46, all `ERR_FAILED` from both, and again
@@ -208,13 +207,11 @@ wall-clock and unaffected: the 500 ms and 5 s reply timeouts, the 300 ms
 `ReadMsgs(100)` / `ReadMsgs(500)` returning at 107 / 508 ms against this
 driver's 99.5 / 501 ms.
 
-Our own numbers are native and worth reading: before this harness,
-`PassThruOpen` took ~92 ms and `PassThruClose` ~51 ms here against 24 and
-6 ms for the vendor DLL doing the same wire work. The cause was the open
-sequence draining and settling the pipe to guard against stale replies, and
-the close waiting for a 50 ms reader poll. Numbering commands the way the
-vendor does removes the need for the drain, and the poll is now 10 ms; the
-cable run after the change is in `tools/ab-official/out/report.md`.
+Our own numbers are native: `PassThruOpen` takes about 2 ms and
+`PassThruClose` about 11 ms against the vendor's 24 and 6 ms for the same
+wire work. An earlier open that drained and settled the pipe against stale
+replies took 92 ms; numbering commands the way the vendor does made the
+drain unnecessary.
 
 `bench` runs N write/read cycles and records each; `ab_diff.py` prints
 medians. With the cable attached both sides see real USB latency, and the
@@ -241,8 +238,8 @@ Measured on the bench, 2026-09-13, firmware 1.17.4877: the sequence number is
 echoed on every reply (`arr 16 108 3`, `arf6 0 8`, `arg6 30 0 10`,
 `are 1 9`); `atm` answers `arm6 <id> <seq>` and `atn` stops it; `tbi` gets
 no reply with either line ending; `atv 12 -1` is accepted. All four are in
-`PROTOCOL.md` and the simulator now answers `atm`. Still open: the chunk
-layout of a >250-byte reply on the wire, which needs an ECU that sends one.
+`PROTOCOL.md` and modelled in the simulator. Still open: the chunk layout of
+a >250-byte reply on the wire, which needs an ECU that sends one.
 
 ## Replaying a real application through both drivers
 

@@ -1,12 +1,11 @@
 # Differential testing against the prior driver
 
-This driver replaces one already in service. The question that matters is not
-"does it work" but "does it do the same thing, and where it differs, which one
-is right".
-
-Reference implementation: the MQBau-Engineering macOS/arm64 fork of the
-`dschultzca`/`NikolaKozina` Linux `j2534` driver (`libj2534.dylib`, passed as
-`OLD_DRIVER`). Its upstream is deleted.
+This driver replaced one already in service: the MQBau-Engineering
+macOS/arm64 fork of the `dschultzca`/`NikolaKozina` Linux `j2534` driver
+(`libj2534.dylib`, passed as `OLD_DRIVER`; its upstream is deleted). The
+question was not "does it work" but "does it do the same thing, and where it
+differs, which one is right". Where it differs from Tactrix's own driver is a
+separate question, answered in [`AB-OFFICIAL.md`](AB-OFFICIAL.md).
 
 ## Method
 
@@ -14,38 +13,39 @@ Both libraries are driven through **one identical sequence** by
 `tests/differential/diff_runner.c`, which `dlopen`s whichever library it is
 pointed at. Two things are captured per run:
 
-1. **What it returned** — every return code and output value.
-2. **What it put on the wire** — `tools/usbtap/usbtap.c` interposes
+1. **What it returned**: every return code and output value.
+2. **What it put on the wire**: `tools/usbtap/usbtap.c` interposes
    `libusb_bulk_transfer` via `DYLD_INSERT_LIBRARIES` and logs every transfer
    with direction, endpoint, timeout, result and bytes.
 
 Both libraries link the same libusb, so one tap observes both and the traces
 are directly comparable. The wire trace is the stronger evidence: it is what
-the cable actually sees, independent of how either library is written.
+the cable actually sees, independent of how either library is written. The
+harness is macOS-only, because the tap is a DYLD interposer.
 
 ```bash
-make differential                      # no-hardware section
-make differential DIFF_ARGS=--hardware # full sequence, cable required
+make differential OLD_DRIVER=/path/to/libj2534.dylib                      # no-hardware section
+make differential OLD_DRIVER=/path/to/libj2534.dylib DIFF_ARGS=--hardware # full sequence, cable required
 ```
 
-Artifacts land in `tests/differential/out/`.
+Artifacts land in `tests/differential/out/`. The runner is bench-safe: it
+switches programming voltage off rather than on.
 
 ### Three traps this harness fell into, and how it is guarded
 
-Worth recording, because each produced a **confident, wrong "identical"** —
-the same failure mode the driver itself is built to avoid.
+Each produced a **confident, wrong "identical"**, the failure mode the driver
+itself is built to avoid.
 
 1. **Both runs loaded the same library.** `DYLD_LIBRARY_PATH` overrides even an
    absolute `dlopen` path by leaf name, and both libraries are called
-   `libj2534.dylib`. The result was a flawless match that meant nothing.
-   *Guard:* the runner reports the path `dladdr` actually resolved and aborts
-   if it is not the one requested; the harness sets no `DYLD_LIBRARY_PATH`.
+   `libj2534.dylib`. *Guard:* the runner reports the path `dladdr` actually
+   resolved and aborts if it is not the one requested; the harness sets no
+   `DYLD_LIBRARY_PATH`.
 2. **Both runs crashed and produced nothing.** Two empty files diff clean.
    *Guard:* an empty result or a missing trace is a fatal harness error.
 3. **The hung run's output was lost.** The old driver blocks forever on many
    transfers, so the watchdog `SIGKILL`s it and fully-buffered stdout dies with
-   it — discarding the record of which call wedged. *Guard:* the runner
-   line-buffers.
+   it. *Guard:* the runner line-buffers.
 
 One more, specific to Apple Silicon: `bash`, `env`, `dirname` and `sleep` are
 all **arm64e**, while libusb is arm64-only so the tap cannot be fat. Any arm64e
@@ -54,18 +54,16 @@ injection is therefore applied to the runner's own `exec` and to nothing else.
 
 ## Results
 
-Sequence: open, read version, read battery, connect ISO15765 @ 500k, set
+Sequence: open, read version, read battery, connect ISO15765 at 500 kbit, set
 BS/STMIN, install a flow-control filter, clear the RX buffer, write a
-TesterPresent `$3E`, read, start and stop a periodic message, request
-programming voltage, then a set of deliberate error paths. Bench conditions:
-**cable on USB, not connected to a vehicle**, so there is no CAN bus and every
-transmit is expected to fail.
-
-`rc=0` is `STATUS_NOERROR`.
+TesterPresent `$3E`, read, start and stop a periodic message, programming
+voltage, then a set of deliberate error paths. Bench conditions: **cable on
+USB, not connected to a vehicle**, so there is no CAN bus and every transmit
+is expected to fail. `rc=0` is `STATUS_NOERROR`.
 
 | Call | Old | New | Which is right |
 |---|---|---|---|
-| `GetLastError` before open | `len=0` | `len=8` | **New.** Old returns an empty string always — a caller cannot report why anything failed |
+| `GetLastError` before open | `len=0` | `len=8` | **New.** Old returns an empty string always; a caller cannot report why anything failed |
 | `PassThruOpen` | 0 | 0 | agree |
 | `ReadVersion` | `1.17.4877` | `1.17.4877` | agree |
 | `Ioctl READ_VBATT` | 130 | 130 | agree |
@@ -74,18 +72,18 @@ transmit is expected to fail.
 | `StartMsgFilter` | 0, filter 0 | 0, filter 0 | agree |
 | `WriteMsgs $3E` | **0, sent=1** | **9, sent=0** | **New.** See below |
 | `ReadMsgs` (500 ms) | **0, received=4** | **16, received=0** | **New.** See below |
-| `StartPeriodicMsg` | 0, msgid=0 | 0, msgid=1 | **New.** Old is a stub |
-| `SetProgrammingVoltage` | **0** | **1** | **New.** Old is a stub reporting success |
+| `StartPeriodicMsg` | 0, msgid=0 | 0 | **New.** Old is a stub that transmits nothing |
+| `SetProgrammingVoltage` | **0** | device's answer | **New.** Old is a stub reporting success |
 | `Connect` twice | **0** | **20** | **New.** Device said `are 20` |
 | `Disconnect` channel 9 | **0** | **2** | **New.** Channel 9 was never opened |
 | `Ioctl` id `0xDEAD` | 1 | 15 | **New.** `ERR_INVALID_IOCTL_ID` is the specified code |
 | `StartMsgFilter(NULL mask)` | **segfault** | **4** | **New.** See below |
-| `StopMsgFilter` / `Disconnect` / `Close` | not reached | 0 | — |
+| `StopMsgFilter` / `Disconnect` / `Close` | not reached | 0 | |
 
 ### The three that matter
 
 **`WriteMsgs` reported success for a transmit the device rejected.** The wire
-trace settles it — the device's own answer was `are 9`:
+trace settles it; the device's own answer was `are 9`:
 
 ```
 OUT ep=0x02 timeout=1000 len=17 |att6 6 64\r\n\x00\x00\x07\xe0>\x00|
@@ -97,11 +95,9 @@ distinguish a delivered command from one that never reached the bus. On a
 reflash that is the difference between a completed erase and a silent stall.
 
 **`ReadMsgs` returned four messages that do not exist.** There was no bus, no
-node and no traffic; the trace contains no inbound message frame.
-
-The mechanism is simpler than it first looked, and worth stating exactly. The
-old driver only writes back through `pMsg` and `pNumMsgs` when it has at least
-as many messages as were requested:
+node and no traffic; the trace contains no inbound message frame. The old
+driver only writes back through `pMsg` and `pNumMsgs` when it has at least as
+many messages as were requested:
 
 ```c
 if (rcvBufIndex >= *pNumMsgs) { memcpy(pMsg, ...); /* pNumMsgs updated here */ }
@@ -110,47 +106,31 @@ return 0;
 
 A short read falls straight past that and returns `STATUS_NOERROR` with
 `*pNumMsgs` **still holding the caller's requested count** and `pMsg`
-untouched. It does not fabricate message content — it simply never reports that
-it read nothing, so the caller consumes whatever was already in its own buffer
-as though it were bus traffic. Asking for four and receiving none yields
-"success, four messages".
-
-The new driver sets `*pNumMsgs` on every return path and reports
-`ERR_BUFFER_EMPTY`.
-
-Its buffer handling is otherwise sound and was misread on first inspection: a
-correct `if (rcvBufIndex >= 8) goto ARRAY_FULL;` guard prevents the fixed
-eight-slot array from being overrun. What does not work is the overflow
-*report* beside it — `rcvBufIndex` is `uint32_t`, so `rcvBufIndex < 0` is never
-true, and the guard caps the index at 8 so `rcvBufIndex > 8` is never true
-either. The `ERR_BUFFER_OVERFLOW` return is unreachable, and messages dropped
-when the array fills are lost silently.
+untouched, so the caller consumes whatever was already in its own buffer as
+though it were bus traffic. Asking for four and receiving none yields
+"success, four messages". Its overflow report is unreachable too:
+`rcvBufIndex` is `uint32_t`, so `rcvBufIndex < 0` is never true, and the guard
+caps the index at 8 so `rcvBufIndex > 8` is never true either; messages
+dropped when the eight-slot array fills are lost silently.
 
 **`StartMsgFilter(NULL mask)` crashes the old driver.** It dereferences
-`pMaskMsg` before checking it. Reproduced in isolation: the process dies at the
-call with no return. The new driver returns `ERR_NULL_PARAMETER`.
+`pMaskMsg` before checking it.
 
 ### Wire-level differences
 
-Both drivers emit the same command vocabulary — `ato6 0 500000 0`,
-`ats6 30 0`, `atf6 3 0 4` + 12 payload bytes, `att6 6 64` + payload, `atc6`,
-`atz` — byte for byte. The differences are structural:
+Both drivers emit the same command vocabulary, `ato6 0 500000 0`,
+`ats6 30 0`, `atf6 3 0 4` plus 12 payload bytes, `att6 6 64` plus payload,
+`atc6`, `atz`, byte for byte. The differences are structural:
 
 | | Old | New |
 |---|---|---|
-| Opening handshake | `\r\n\r\nati\r\n`, then `ata` | drain, `atz`, drain, `ata`, `ati` |
-| Transfer timeouts | `timeout=0` on most transfers — **blocks forever** | every transfer bounded |
-| Command + payload | one transfer | two (line, then payload) — same bytes, same order |
-| Reads | on demand, inside `ReadMsgs` | continuous 50 ms poll in a reader thread |
+| Opening handshake | `\r\n\r\nati\r\n`, then `ata` | `\r\n\r\n`, `atz`, `ata`, `ati`, every command numbered and its reply matched by number |
+| Transfer timeouts | `timeout=0` on most transfers: **blocks forever** | every transfer bounded |
+| Command + payload | one transfer | two (line, then payload); same bytes, same order |
+| Reads | on demand, inside `ReadMsgs` | continuous 10 ms poll in a reader thread, so message frames and command replies are demultiplexed instead of one being lost behind the other |
 
-The old driver's `timeout=0` is visible throughout its trace and is exactly
-what makes a wedged cable hang the calling application instead of returning
-`ERR_TIMEOUT`.
-
-The reader thread makes the new trace noisier — idle polls appear as
-`rc=-7 len=0` lines — but it is what allows asynchronous message frames and
-command replies to be demultiplexed rather than one being lost behind the
-other.
+The old driver's `timeout=0` is exactly what makes a wedged cable hang the
+calling application instead of returning `ERR_TIMEOUT`.
 
 ## Intentional divergences
 
@@ -158,119 +138,79 @@ Each is a deliberate decision to be correct rather than bug-compatible.
 
 | # | Divergence | Why |
 |---|---|---|
-| 1 | Stubs return `ERR_NOT_SUPPORTED`, never `STATUS_NOERROR` | A caller using `StartPeriodicMsg` for a TesterPresent keep-alive otherwise gets silence and believes it is transmitting |
-| 2 | `StartPeriodicMsg`/`StopPeriodicMsg` are implemented | In the firmware (`atm`/`atn`), the commands the vendor DLL sends |
-| 3 | `SetProgrammingVoltage` implemented | `atv`, as the vendor sends it; one pin at a time, as J2534-1 §7.2.11 requires |
-| 4 | `ReadMsgs` does **not** double a timeout below 100 ms | The old driver silently doubled the caller's timeout for K-line. That breaks the API contract. A K-line caller should pass the timeout it needs |
+| 1 | Nothing returns `STATUS_NOERROR` for work it did not do; the one unsupported facility, the J1850 functional-message table, returns `ERR_NOT_SUPPORTED` | A caller using `StartPeriodicMsg` for a TesterPresent keep-alive on the old driver got silence and believed it was transmitting |
+| 2 | `StartPeriodicMsg`/`StopPeriodicMsg` are implemented, in the firmware (`atm`/`atn`) as the vendor DLL does | The old driver's are stubs |
+| 3 | `SetProgrammingVoltage` is implemented (`atv`); one pin at a time, as J2534-1 §7.2.11 requires | The old driver's is a stub |
+| 4 | `ReadMsgs` does **not** double a timeout below 100 ms | The old driver silently doubled the caller's timeout for K-line, which breaks the API contract |
 | 5 | Every libusb call is checked and every timeout bounded | 19 of 26 transfers in the old driver ignore the return code; 20 of 26 use timeout 0 |
 | 6 | `GetLastError` returns real text | It returned an empty string |
-| 7 | IOCTLs 4, 9, 10 and 14 implemented; 11–13 return `ERR_NOT_SUPPORTED` | 11–13 are the J1850 functional-message table, and this device rejects J1850 outright, so claiming support would be undetectably false |
-| 8 | `Ioctl` with an unknown id returns `ERR_INVALID_IOCTL_ID` (15) | Old returned `ERR_NOT_SUPPORTED` (1) |
+| 7 | IOCTLs 4, 9, 10 and 14 implemented | They were missing |
+| 8 | An unknown ioctl id returns `ERR_INVALID_IOCTL_ID` (15) | Old returned `ERR_NOT_SUPPORTED` (1) |
 | 9 | Errors from the device are passed through unchanged | `are <n>` already carries the J2534 code; remapping loses information |
-| 10 | Synchronising handshake at open; orphan replies discarded | §9.2 of PROTOCOL.md — a stale reply silently corrupts every later result |
+| 10 | Commands are numbered and replies matched by number; a reply nobody waits for is discarded | `PROTOCOL.md` §9: a stale reply otherwise corrupts every later result |
 | 11 | Filter messages must all be the same length | The device takes one length for all of them; a mismatch would shift the pattern on the wire |
-| 12 | Version parsed at the `": "` delimiter, not byte offset 24 | Offset 24 happens to equal `strlen("ari main code version : ")`. The delimiter survives a firmware that changes the prefix |
-| 13 | A flow-control message on a PASS/BLOCK filter is rejected with `ERR_INVALID_MSG` | J2534-1 DEC2004 §7.2.9.2 states it verbatim. Accepting it silently would let a caller believe flow control had been configured on a filter type that has none. Found by a conformance review; we were silently ignoring it |
-| 14 | `WriteMsgs` treats `Timeout` as a budget for the whole call | Handing each message the full value let a five-message write overrun a 300 ms budget by 635 ms **and still return `STATUS_NOERROR`**. Only slow-but-successful writes expose this: the call returns on the first failure, so a silent device never reaches message two |
-| 15 | `ReadMsgs` returns `ERR_BUFFER_OVERFLOW` when the receive queue has overrun | Dropped messages were counted and never surfaced. A caller reading too slowly lost vehicle data with no way to know its view of the bus had a hole in it. Surviving messages are still delivered and counted in `pNumMsgs` |
-| 16 | An invalid `FilterType` returns `ERR_INVALID_MSG` | The standard names no code for this. `ERR_INVALID_FILTER_ID` is arguable, but that code is about the id, not the type, and `ERR_INVALID_MSG` is what §7.2.9.2 uses for the adjacent malformed-argument case. Recorded as a deliberate choice rather than left accidental |
+| 12 | Version parsed at the `": "` delimiter, not byte offset 24 | Offset 24 happens to equal `strlen("ari main code version : ")`; the delimiter survives a firmware that changes the prefix |
+| 13 | A flow-control message on a PASS/BLOCK filter is rejected with `ERR_INVALID_MSG` | J2534-1 §7.2.9.2 states it verbatim; accepting it silently would let a caller believe flow control had been configured on a filter type that has none |
+| 14 | `WriteMsgs` treats `Timeout` as a budget for the whole call | Handing each message the full value let a five-message write overrun a 300 ms budget by 635 ms and still return `STATUS_NOERROR` |
+| 15 | `ReadMsgs` returns `ERR_BUFFER_OVERFLOW` when the receive queue has overrun; the surviving messages are still delivered and counted | Dropped messages were counted and never surfaced |
+| 16 | An invalid `FilterType` returns `ERR_INVALID_MSG` | The standard names no code for this; `ERR_INVALID_MSG` is what §7.2.9.2 uses for the adjacent malformed-argument case |
 
-## Decisions taken where the standard and the device disagree
-
-Three points where conformance and observed behaviour pulled apart, resolved
-2026-09-13 after auditing against SAE J2534-1, ISO 15765 and the K-line
-standards. The principle applied was: no surprising behaviour for an
-application written against the standard, and never discard information a
-caller cannot recover.
+## Decisions where the standard and the device pulled apart
 
 | Point | Decision | Why |
 |---|---|---|
-| A TxDone indication carries the CAN id on the wire. J2534-1 DEC2004 §8.6 says DataSize 4 (or 5) with the CAN id of the message just sent, and the vendor DLL reports exactly that (measured on a live bus 2026-09-13, `RxStatus 0x9, DataSize 4`) | **Report the id** | An earlier revision reported no data, citing the JAN2022 revision. The driver reports API 04.04, whose text and the vendor agree |
-| A full receive queue: discard the oldest message or the newest? | **Conform** — discard the arriving one | Also the safer answer. A caller that ignores the overflow return then gets a truncated but contiguous sequence, instead of one with an unmarked hole in the middle. The previous reasoning, that a stale message is less useful than a fresh one, is true of a live gauge and wrong for a diagnostic exchange where order is the point |
-| Per-protocol message size limits | **Enforce the certain ones only** | The minima, and the maxima that follow from the wire format. ISO14230's maximum depends on connect flags this driver does not track, so it is left to the device — wrongly rejecting a valid message would be worse |
-
-### Two ECUs answering at once
-
-ISO15765 reassembly keeps one context per channel. If two ECUs answer a
-functional request and **both** replies exceed one wire frame, their
-continuation frames interleave and would be concatenated into each other.
-
-Every continuation chunk carries the CAN id (the vendor DLL reassembles only
-that layout, `AB-OFFICIAL.md`), so routing chunks by id is possible. It is
-not done: no legislated OBD reply approaches 250 bytes, only one ECU has ever
-answered in a measured session, and the vendor DLL keeps one context too.
+| The transmit indication carries the CAN id on the wire | Report it: `DataSize` 4, `ExtraDataIndex` 0 | J2534-1 DEC2004 §8.6 says exactly that, and so does the vendor DLL (measured on a live bus 2026-09-13, `RxStatus 0x9, DataSize 4`) |
+| A full receive queue: discard the oldest message or the newest? | Discard the arriving one | J2534-1 requires it, and a caller that ignores the overflow return then sees a truncated but contiguous sequence instead of one with an unmarked hole |
+| Per-protocol message size limits | Enforce J2534-1 Figure 42 for CAN and ISO15765; leave ISO14230's to the device | ISO14230's maximum depends on the checksum flag, and wrongly rejecting a valid message would be worse than letting the device reject it |
+| Two ECUs answering a functional request with segmented replies at once | One reassembly context per channel, as the vendor DLL keeps | Every continuation chunk carries the CAN id, so routing by id is possible; no legislated OBD reply approaches 250 bytes and only one ECU has ever answered in a measured session |
 
 ## A bug this harness found in the new driver
 
-Worth recording, because it is the argument for doing differential testing at
-all rather than trusting a unit suite.
+The argument for doing differential testing against hardware at all rather
+than trusting a unit suite: the first hardware run showed
+`PassThruStopMsgFilter` returning `ERR_TIMEOUT` while every unit test passed.
+A transmit the cable took 1.2 s to reject had been abandoned after 200 ms,
+and its late `are 9` was collected by the next command, which reported the
+transmit's failure as its own. That is `PROTOCOL.md` §9.2 occurring inside
+the new driver. Fixed by accepting a reply only when a command is waiting for
+one, and since then by matching every reply to its command by sequence
+number; `late_reply_is_not_reused()` in `tests/unit/test_j2534.c` is the
+regression.
 
-The first hardware run showed `PassThruStopMsgFilter` returning `ERR_TIMEOUT`
-against real hardware while every unit test passed. Cause: the host-scheduled
-periodic message used a 200 ms deadline, but a CAN transmit with no bus takes
-~1.2 s to be rejected. The write gave up; the device's late `are 9` was then
-collected by the *next* command, which reported it as its own failure.
+## What this comparison covers, and what it does not
 
-That is the §9.2 hazard occurring inside the new driver. Fixed by accepting a
-reply only when a command is waiting for one, and since then by matching
-every reply to its command by sequence number. The host scheduler itself is
-gone: periodic messages run in the firmware.
-`late_reply_is_not_reused()` in `tests/unit/test_j2534.c` is the regression.
-
-## What has not been tested
-
-The bench had no vehicle, so **no test here has exercised a live CAN bus**.
-Specifically untested against both drivers: received messages carrying real
-data, multi-frame ISO-TP reassembly, K-line initialisation, timing under load,
-and cable-yanked-mid-read. These need the sequence re-run with the cable on a
-vehicle; the harness supports it unchanged.
+The old-driver comparison was made on a bench with no bus, so it covers
+transmit failure, error paths and the wire vocabulary, not received data. The
+live-bus comparisons since then were made against Tactrix's own DLL rather
+than the old driver (`AB-OFFICIAL.md`: identical raw CAN frames on the Audi,
+identical periodic commands, identical multi-frame delivery), and the
+received-message framing is pinned by recordings from a 2012 VW Caddy in
+`tests/unit/test_golden.c`. Re-running this harness on a vehicle would add
+nothing the vendor comparison has not already settled.
 
 ## Against the vendor's own DLL
 
-`tools/ab-official/` runs Tactrix's `op20pt32.dll` on this machine (Docker,
-box64 + Wine) through the same scripted sequence as this driver; the method
-and the wire findings are in `docs/AB-OFFICIAL.md`. Where the two libraries
-return different codes for the same call, 2026-09-13, build 1.02.0.4868:
+Where this driver and Tactrix's `op20pt32.dll` 1.02.0.4868 return different
+codes for the same call, the driver follows the standard's text:
 
-| Call | Vendor | This driver | Standard (J2534-1 JAN2022) |
+| Call | Vendor | This driver | J2534-1 DEC2004 |
 |---|---|---|---|
-| `PassThruDisconnect` on a channel that was never opened, before `Open` | `ERR_INVALID_CHANNEL_ID` | `ERR_INVALID_DEVICE_ID` | `ERR_INVALID_DEVICE_ID`: §7.2.1, any call before a successful Open |
-| `PassThruIoctl` given a device id where a channel id is expected | `ERR_INVALID_CHANNEL_ID` | `ERR_INVALID_IOCTL_ID` | `ERR_INVALID_CHANNEL_ID` reads closer to the text |
+| Any call before a successful `PassThruOpen`, or after `PassThruClose` | `ERR_INVALID_CHANNEL_ID` | `ERR_INVALID_DEVICE_ID` | §7.2.1 |
+| `PassThruIoctl` with an unknown id, given a device id | `ERR_INVALID_CHANNEL_ID` | `ERR_INVALID_IOCTL_ID` | either reads |
 | `PassThruStartMsgFilter` with a NULL mask | `ERR_FAILED` | `ERR_NULL_PARAMETER` | `ERR_NULL_PARAMETER` |
-| `PassThruWriteMsgs` with `Timeout=0` on a bus with no ACK peer (cable, bench) | `STATUS_NOERROR`, 1 sent; the frame is queued unnumbered and not waited for | `ERR_TIMEOUT`, 0 sent | queue and return immediately: the vendor |
-| `PassThruIoctl(CLEAR_RX_BUFFER)` | clears the DLL's queue, nothing on the wire | used to also send `atl` to the device | either; now the same as the vendor |
-| `PassThruWriteMsgs` transmit budget | sends the Timeout to the firmware (`att … <timeout_us>`) | used to send none, leaving the firmware's ~1 s default even for a 5 s write | the vendor; now the same |
-| `PassThruIoctl(FIVE_BAUD_INIT, 0x33)` | `atw3 51` | used to send `atw3 1` + a raw 0x33 byte, initialising address 1 | the vendor; now the same |
-| Periodic message running (live bus, 100 ms) | `atm`: scheduled by the firmware, no transmit-done indications | used to schedule on the host with `att`; now `atm` | the vendor; now the same |
+| A second programming-voltage pin, or grounding K or L under a channel that uses it | passed to the cable | refused (`ERR_PIN_INVALID`, `ERR_CHANNEL_IN_USE`) | §7.2.11: one pin at a time |
 
-Where the two still differ, the driver follows the standard's text: any call
-before a successful `PassThruOpen` returns `ERR_INVALID_DEVICE_ID` (§7.2.1),
-a NULL message pointer returns `ERR_NULL_PARAMETER`, and an unknown ioctl id
-returns `ERR_INVALID_IOCTL_ID`. Every other return code in the sequence
-agrees, including the timeout, filter, message-id and channel-in-use cases.
+Every other return code agrees, and so does everything on the wire but the
+open handshake, a numbered Timeout=0 write, and a duplicate connect or an
+unknown periodic id refused locally rather than sent (`AB-OFFICIAL.md`).
 
-## Real-world validation: drop-in replacement
+## Drop-in replacement, as a consuming tool sees it
 
-**Caveat, added after the fact:** the bench run below never received a
-message, so it validated the transmit side of "drop-in" and nothing of the
-receive side. The receive framing this driver shipped with would have made a
-real consumer discard every segmented response on a car (`PROTOCOL.md` §7).
-The old driver, for all its faults, surfaced the START announcement as a
-separate message — accidentally the right shape. That is now covered without
-a car by `s_consumer_rule` in `tests/sim/run_scenarios.py`, which applies the
-consumer's acceptance rule against the simulator.
-
-The consuming tools in question are Python read and write tools that load a
-J2534 library via `ctypes.CDLL` and use ISO15765 with a flow-control filter,
-`SET_CONFIG`, `READ_VBATT`, `CLEAR_RX_BUFFER`, `ISO15765_BS`/`STMIN`, and the
-`ISO15765_FRAME_PAD` TxFlag. The write tool shares the read tool's J2534
-wrapper, so exercising the read tool covers both — which is the right way
-round, because the write tool can erase an irreplaceable ECU and is not
-something to run as a driver test.
-
-All fourteen entry points are exported and resolve under `ctypes`.
-
-The read tool's probe, cable on the bench with no vehicle:
+Python read and write tools that load a J2534 library via `ctypes.CDLL` and
+use ISO15765 with a flow-control filter, `SET_CONFIG`, `READ_VBATT`,
+`CLEAR_RX_BUFFER` and the `ISO15765_FRAME_PAD` TxFlag were pointed at both
+drivers, cable on the bench with no vehicle. All fourteen entry points resolve
+under `ctypes`.
 
 | | Old driver | New driver |
 |---|---|---|
@@ -280,7 +220,9 @@ The read tool's probe, cable on the bench with no vehicle:
 | Reason given | `no response to service 0x23 (last=None)` | `PassThruWriteMsgs failed: rc=9 ERR_TIMEOUT` |
 
 Same behaviour, one meaningful difference. The old driver swallowed the
-transmit failure and presented it as **a silent ECU**, sending the operator off
-to check CAN ids, baud rate and session state. The new driver reports that the
-message never reached a bus at all — which is the actual situation, and is one
-line of output instead of an afternoon.
+transmit failure and presented it as a silent ECU, sending the operator off
+to check CAN ids, baud rate and session state. The new driver reports that
+the message never reached a bus at all, which is the actual situation. The
+receive side of "drop-in", which a bench cannot show, is covered by the
+consumer's own acceptance rule replayed over the Caddy exchange
+(`s_consumer_rule` in `tests/sim/run_scenarios.py`).
