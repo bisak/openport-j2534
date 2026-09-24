@@ -110,13 +110,21 @@ preceded by the battery check. On Linux add `--dev /dev/ttyACM0`; the default is
 the first `/dev/cu.usbmodem*`.
 
 ```bash
-python3 tools/car/car_capture.py --request 090A --out live-1.txt                                  # one CAN request
-python3 tools/car/car_capture.py --tx 0x7DF --out capture.txt                                     # functional address, if TesterPresent got no answer
-python3 tools/car/car_capture.py --kline --out kline.txt                                          # the K-line section
-python3 tools/car/car_capture.py --kline --kline-variants five01,fast01 --out kline-vag.txt       # some K-line variants
-python3 tools/car/car_capture.py --kline-init fast01 --kline-request 1A9C --out live-2.txt        # one K-line request
+# one CAN request
+python3 tools/car/car_capture.py --request 090A --out live-1.txt
+# functional address, if TesterPresent got no answer
+python3 tools/car/car_capture.py --tx 0x7DF --out capture.txt
+# the K-line section
+python3 tools/car/car_capture.py --kline --out kline.txt
+# some K-line variants
+python3 tools/car/car_capture.py --kline --kline-variants five01,fast01 --out kline-vag.txt
+# one K-line request
+python3 tools/car/car_capture.py --kline-init fast01 --kline-request 1A9C --out live-2.txt
+# one K-line wake-up, without the battery check
 python3 tools/car/car_capture.py --kline --kline-variants five01 --only q2 --no-preflight --out live-4.txt
-python3 tools/car/car_capture.py --tp20 --out tp20.txt                                            # VW TP2.0
+# VW TP2.0
+python3 tools/car/car_capture.py --tp20 --out tp20.txt
+# analyse them
 python3 tools/car/analyse_capture.py live-*.txt
 ```
 

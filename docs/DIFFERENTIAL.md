@@ -29,8 +29,10 @@ against Tactrix's DLL instead.
 macOS only: the USB traffic recorder is a `DYLD_INSERT_LIBRARIES` interposer.
 
 ```bash
-make differential OLD_DRIVER=/path/to/libj2534.dylib                          # the part that needs no cable
-make differential OLD_DRIVER=/path/to/libj2534.dylib DIFF_ARGS=--hardware     # the full sequence, cable attached
+# the part that needs no cable
+make differential OLD_DRIVER=/path/to/libj2534.dylib
+# the full sequence, cable attached
+make differential OLD_DRIVER=/path/to/libj2534.dylib DIFF_ARGS=--hardware
 ```
 
 Output goes to `tests/differential/out/`. The run is safe on a bench: it

@@ -22,9 +22,12 @@ limit.
 ## Build and test
 
 ```bash
-make              # the library and op_probe
-make test         # unit tests and vehicle recordings; no cable needed
-make check-all    # plus sanitizers, fuzzing and the protocol simulator
+# the library and op_probe
+make
+# unit tests and vehicle recordings; no cable needed
+make test
+# plus sanitizers, fuzzing and the protocol simulator
+make check-all
 ```
 
 [docs/TESTING.md](docs/TESTING.md) describes each layer and the tests that need

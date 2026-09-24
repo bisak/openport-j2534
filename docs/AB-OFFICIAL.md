@@ -48,8 +48,10 @@ mingw-w64 cross compiler, and a copy of `op20pt32.dll`.
 
 ```bash
 brew install mingw-w64
-make ab-official AB_DLL=/path/to/op20pt32.dll                                    # against the simulator
-make ab-official-cable AB_DLL=/path/to/op20pt32.dll CABLE=/dev/cu.usbmodemXXXX  # against the cable
+# against the simulator
+make ab-official AB_DLL=/path/to/op20pt32.dll
+# against the cable
+make ab-official-cable AB_DLL=/path/to/op20pt32.dll CABLE=/dev/cu.usbmodemXXXX
 ```
 
 `AB_ARGS` is passed to `ab.sh`. Scenario names go after `--`:

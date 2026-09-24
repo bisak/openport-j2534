@@ -26,8 +26,10 @@ From source, on macOS or Linux:
 git clone https://github.com/bisak/openport-j2534.git
 cd openport-j2534
 make
-make test          # hardware-free test suite, no cable needed
-make install       # into /opt/homebrew or /usr/local; set PREFIX=... to change
+# hardware-free test suite, no cable needed
+make test
+# into /opt/homebrew or /usr/local; set PREFIX=... to change
+make install
 ```
 
 On Linux, allow your user to open the cable once, then re-plug it:
@@ -43,7 +45,8 @@ Remove the cable's microSD card (with a card inserted the cable appears as a
 USB disk), plug the cable in, and run:
 
 ```bash
-op_probe           # should list the cable: USB 0403:cc4d
+# should list the cable: USB 0403:cc4d
+op_probe
 ```
 
 From a source checkout you can also open the cable and read its firmware
@@ -80,7 +83,8 @@ From Python:
 
 ```python
 import ctypes
-j2534 = ctypes.CDLL("/opt/homebrew/lib/libj2534.dylib")  # /usr/local/lib/libj2534.so on Linux
+# /usr/local/lib/libj2534.so on Linux
+j2534 = ctypes.CDLL("/opt/homebrew/lib/libj2534.dylib")
 dev = ctypes.c_ulong()
 j2534.PassThruOpen(None, ctypes.byref(dev))
 ```

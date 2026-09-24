@@ -25,8 +25,10 @@ make check-all
 To run one simulator scenario, or the simulator on its own:
 
 ```bash
-python3 tests/sim/run_scenarios.py s_multiframe   # on Linux: OPENPORT_LIB=$PWD/libj2534.so first
-python3 tests/sim/openport_sim.py --verbose       # prints the pty to point OPENPORT_DEVICE at
+# on Linux: OPENPORT_LIB=$PWD/libj2534.so first
+python3 tests/sim/run_scenarios.py s_multiframe
+# prints the pty to point OPENPORT_DEVICE at
+python3 tests/sim/openport_sim.py --verbose
 ```
 
 ## Why a simulator
