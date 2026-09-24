@@ -68,7 +68,7 @@ OPENPORT_DEVICE="$DEV" ./examples/op_smoke 2>&1 | tee "$out/3-smoke-serial.txt" 
 say "4. protocol capture — every open question in PROTOCOL.md section 12"
 python3 tools/car/car_capture.py --dev "$DEV" --out "$out/4-protocol-capture.txt" 2>&1 | tail -30
 
-say "4b. K-line capture — four standard wake-ups, read-only requests"
+say "4b. K-line capture — five standard wake-ups, read-only requests"
 python3 tools/car/car_capture.py --dev "$DEV" --kline --only q2 --no-preflight \
   --out "$out/4b-kline-capture.txt" 2>&1 | tail -30
 

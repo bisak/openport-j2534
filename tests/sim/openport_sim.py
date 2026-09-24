@@ -15,9 +15,9 @@ late, desynchronise the stream, truncate a frame, or vanish mid-transfer.
 Fidelity
 --------
 Every command response here was measured against a real OpenPort 2.0
-(firmware 1.17.4877) — see docs/PROTOCOL.md. `check_fidelity.py` re-runs an
-identical command sequence against both the cable and this simulator and diffs
-them, so drift is caught rather than assumed.
+(firmware 1.17.4877) — see docs/PROTOCOL.md. tools/ab-official runs one
+command sequence against the cable and against this simulator, through both the
+vendor DLL and this driver, which is how drift gets caught.
 
 Anything the simulator does that the cable was never observed doing is marked
 MODELLED below, and is our reading of the protocol rather than a measurement.
@@ -447,7 +447,7 @@ class OpenPortSim:
         if verb == "t":  return self._cmd_transmit(rest, payload)
         if verb == "y":  return self._cmd_init(rest, payload, five_baud=False)
         if verb == "w":  return self._cmd_init(rest, payload, five_baud=True)
-        if verb == "p":  return self._cmd_periodic_start(rest, payload)
+        if verb == "p":  return self._cmd_pin_verb_p(rest, payload)
         if verb == "m":  return self._cmd_periodic_vendor(rest, payload)
         if verb == "n":  return self._cmd_periodic_stop(rest)
         if self.wire.answer_unknown:
@@ -759,7 +759,7 @@ class OpenPortSim:
         if resp is not None:
             threading.Timer(0.01, lambda: self.send_message(ch, resp)).start()
 
-    def _cmd_periodic_start(self, rest, payload):
+    def _cmd_pin_verb_p(self, rest, payload):
         """`atp <pin> <value>`: a pin verb sharing `atv`'s argument shape, not
         a periodic message. Measured 2026-09-13 with the cable: every
         (pin, value) tried answers `are 10`, except value 0 which answers

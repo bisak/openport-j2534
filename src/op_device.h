@@ -23,7 +23,7 @@
 /* The device accepts single-digit protocol/channel ids only. */
 #define OP_MAX_CHANNELS   10
 /* Receive queue per channel, in bytes. Messages are stored at their own size:
- * ~17,000 raw CAN frames or ~250 of the largest ISO15765 messages. Tactrix's
+ * ~29,000 raw CAN frames (24-byte header + 12) or ~250 of the largest ISO15765 messages. Tactrix's
  * DLL held 1,460 CAN frames left unread for 29 s without a loss (measured
  * 2026-09-16); a 64-message queue lost 1,438 of them. */
 #define OP_RXQ_BYTES      (1024u * 1024u)

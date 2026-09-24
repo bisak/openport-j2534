@@ -275,7 +275,7 @@ long PassThruClose(J_U32 DeviceID)
     op_err_clear();
     rec_line("close %lu", (unsigned long)DeviceID);
     /* A device id that names nothing open is an invalid id: the standard's
-     * code, and the vendor's (docs/DIFFERENTIAL.md). */
+     * code. The vendor DLL answers ERR_INVALID_CHANNEL_ID (docs/AB-OFFICIAL.md). */
     if (!d->open || DeviceID != OP_DEVICE_ID)
         return fail(ERR_INVALID_DEVICE_ID, "PassThruClose");
 
@@ -647,7 +647,7 @@ long PassThruStartPeriodicMsg(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
     if (c == NULL)
         return fail(ERR_INVALID_CHANNEL_ID, "PassThruStartPeriodicMsg");
     /* Any interval the firmware's microsecond field can carry. J2534 asks for
-     * 5-65535 ms; Tactrix's DLL forwards 4 ms and 65 536 s alike and the
+     * 5-65535 ms; Tactrix's DLL forwards 4 ms and 65 536 ms alike and the
      * firmware runs them (1 ms held, PROTOCOL.md section 10). */
     if (TimeInterval > 0xFFFFFFFFu / 1000u)
         return fail(ERR_INVALID_TIME_INTERVAL, "PassThruStartPeriodicMsg");
@@ -742,8 +742,8 @@ long PassThruStartMsgFilter(J_U32 ChannelID, J_U32 FilterType,
         return fail(ERR_NULL_PARAMETER, "PassThruStartMsgFilter(flow control)");
     /* A flow-control message given with a PASS or BLOCK filter is ignored, as
      * Tactrix's DLL ignores it (tools/ab-official, 2026-09-24). J2534-1
-     * DEC2004 section 7.2.9.2 calls it an error, but refusing it failed
-     * applications that pass a zeroed message instead of NULL. */
+     * DEC2004 section 7.2.9.2 calls it an error, but refusing it would fail
+     * an application that passes a zeroed message instead of NULL. */
     if (need == 2)
         pFlowControlMsg = NULL;
 
