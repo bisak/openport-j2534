@@ -56,7 +56,11 @@ TEST_BIN  := tests/run_tests
 all: $(SHLIB) probe
 
 %.o: %.c
-	$(CC) $(ARCH_FLAGS) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -fPIC -c $< -o $@
+	$(CC) $(ARCH_FLAGS) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -MMD -MP -fPIC -c $< -o $@
+
+# Rebuild an object when a header it includes changes: a struct edited in
+# op_device.h otherwise links old and new layouts into one library.
+-include $(OBJS:.o=.d)
 
 $(SHLIB): $(OBJS)
 	$(CC) $(ARCH_FLAGS) $(SHLIB_FLAG) $(OBJS) $(LDLIBS) -o $@
@@ -89,7 +93,7 @@ uninstall:
 	      $(DESTDIR)$(PCDIR)/openport-j2534.pc
 
 clean:
-	rm -f $(OBJS) $(SHLIB) $(TEST_BIN) tools/op_probe examples/op_smoke examples/op_kline examples/op_iso15765
+	rm -f $(OBJS) $(OBJS:.o=.d) $(SHLIB) $(TEST_BIN) tools/op_probe examples/op_smoke examples/op_kline examples/op_iso15765
 	rm -rf *.dSYM tests/*.dSYM tools/*.dSYM
 
 smoke: examples/op_smoke
