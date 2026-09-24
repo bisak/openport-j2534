@@ -16,7 +16,8 @@ A change is ready when:
 - any behaviour measured on a cable or a vehicle is written down in
   `docs/PROTOCOL.md` with its date, method and confidence marker ([V], [P] or
   [U]);
-- a user-visible change has a line in `NEWS.md` under the unreleased section.
+- a user-visible change has a line in `NEWS.md` under an unreleased section at
+  the top (start one if the newest section is a release).
 
 `docs/TESTING.md` describes every test layer.
 
