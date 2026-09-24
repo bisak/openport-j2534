@@ -3,7 +3,7 @@
 Release history, newest first. Each release is tagged `v<version>` at
 https://github.com/bisak/openport-j2534/releases.
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-09-24)
 
 ### Fixed
 
