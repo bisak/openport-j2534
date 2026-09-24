@@ -161,7 +161,8 @@ class Wire:
         # id_every_chunk it returns the 600-byte reply intact (tools/ab-official,
         # 2026-09-13). The driver strips the id from every continuation chunk
         # the same way, so the other two models are kept only to show what a
-        # consumer would see under them. Not yet captured from the cable itself.
+        # consumer would see under them. The cable was captured doing it, in
+        # 70-byte chunks (can_frames, PROTOCOL.md 7.6).
         self.chunking = "id_every_chunk"
         # K-line (channels 3, 4) frame layout:
         #   asymmetric  0x00/0x20 data frames carry no timestamp; START/END/0x10
@@ -209,6 +210,16 @@ def can_frames(payload, framing="measured", chunking="id_every_chunk"):
     payload = bytes(payload)
     can_id, body = payload[:4], payload[4:]
     frames = []
+    if framing == "measured" and chunking == "id_every_chunk" and len(body) > 7:
+        # Measured 2026-09-24 over 5 000+ segmented replies (PROTOCOL.md 7.6): the
+        # announcement, then the data as it arrives, the first frame's 6 bytes and
+        # nine consecutive frames (69), then ten at a time (70), each chunk
+        # repeating the id; the 250-byte frame limit is never reached.
+        chunks = [body[:69]] + _split(body[69:], 70) if len(body) > 69 else [body]
+        frames.append((STS_START, can_id))
+        frames += [(0x00, can_id + c) for c in chunks[:-1]]
+        frames.append((STS_END, can_id + chunks[-1]))
+        return frames
     if len(payload) <= MAX_FRAME_PAYLOAD:
         segmented = len(body) > 7                  # needed ISO-TP on the bus
         if framing == "measured":
@@ -353,9 +364,10 @@ class OpenPortSim:
           * a message that fit one CAN frame is a single END frame, with no
             announcement.
 
-        MODELLED, because no capture shows it: how a payload longer than one
-        wire frame is chunked, the shape of a transmit echo, and the K-line
-        layout (`Wire.kline_layout`), which follows three independent drivers.
+        Measured since (PROTOCOL.md 7.6, 7.7): long CAN/ISO15765 payloads come in
+        70-byte chunks, and the echo is `_loopback_echo`. MODELLED, because no
+        capture shows it: the K-line layout (`Wire.kline_layout`), which follows
+        three independent drivers.
         """
         lb = STS_LOOPBACK if loopback else 0
         payload = bytes(payload)

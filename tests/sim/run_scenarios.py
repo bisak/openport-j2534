@@ -668,9 +668,9 @@ def s_capture_tool_pads():
 
 
 # ---------------------------------------------------------------------------
-# How a reply longer than one wire frame (250 bytes) is chunked is the last
-# open receive question, and no ECU reached so far will produce one. It can
-# still be reasoned about: on the Caddy a segmented reply arrived as a START
+# How a long reply is chunked was measured on 2026-09-24 (PROTOCOL.md 7.6):
+# 70 data bytes per chunk, the id repeated on each, which the simulator's
+# default reproduces. Before that it was reasoned about: on the Caddy a segmented reply arrived as a START
 # frame carrying the CAN id alone and an END frame carrying the id AGAIN plus
 # the data, so within one message the id is repeated across frames. If that
 # holds for every frame, a >250-byte reply repeats the id on each chunk and
@@ -680,8 +680,7 @@ def s_capture_tool_pads():
 # The driver therefore does not bet on either: a continuation frame beginning
 # with the same four bytes already at the front of the message is repeating the
 # id, and those bytes are dropped. Both models then reassemble identically,
-# which is what this scenario asserts. A capture of a genuinely long reply
-# would still be worth having, but no longer decides whether the data is right.
+# which is what this scenario asserts.
 # ---------------------------------------------------------------------------
 def s_chunking_models():
     """A 600-byte reply crosses two wire-frame boundaries. Under the layout
