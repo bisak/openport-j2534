@@ -56,6 +56,7 @@ const char *op_err_name(long code)
     case ERR_NOT_UNIQUE:            return "ERR_NOT_UNIQUE";
     case ERR_INVALID_BAUDRATE:      return "ERR_INVALID_BAUDRATE";
     case ERR_INVALID_DEVICE_ID:     return "ERR_INVALID_DEVICE_ID";
+    case ERR_INIT_FAILED:           return "ERR_INIT_FAILED";
     default:                        return "ERR_UNKNOWN";
     }
 }
