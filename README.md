@@ -130,8 +130,8 @@ never exercised against a vehicle.
 | `PassThruConnect` / `Disconnect` | complete, J2534-2 channel ids included; connect flags go to the firmware unchanged |
 | `PassThruReadMsgs` | complete; timeout honoured exactly as given; 1 MiB queue per channel, an overrun is reported as `ERR_BUFFER_OVERFLOW` |
 | `PassThruWriteMsgs` | complete; the caller's timeout is the firmware's transmit budget, as the vendor sends it |
-| `PassThruStartPeriodicMsg` / `StopPeriodicMsg` | complete, scheduled by the firmware (`atm`/`atn`), 10 per channel |
-| `PassThruStartMsgFilter` / `StopMsgFilter` | complete (PASS, BLOCK, FLOW_CONTROL) |
+| `PassThruStartPeriodicMsg` / `StopPeriodicMsg` | complete, scheduled by the firmware (`atm`/`atn`), 10 per channel; any interval the firmware runs, as the vendor DLL forwards it, not only J2534's 5–65535 ms |
+| `PassThruStartMsgFilter` / `StopMsgFilter` | complete (PASS, BLOCK, FLOW_CONTROL); a flow-control message given with a PASS or BLOCK filter is ignored, as in the vendor DLL |
 | `PassThruSetProgrammingVoltage` | complete, see below |
 | `PassThruReadVersion` | complete |
 | `PassThruGetLastError` | complete |
@@ -141,11 +141,11 @@ never exercised against a vehicle.
 
 | ID | Name | Status |
 |---|---|---|
-| 1, 2 | `GET_CONFIG`, `SET_CONFIG` | complete; passed to the firmware, whose supported set differs per protocol (`PROTOCOL.md` §8); an unsupported parameter returns `ERR_NOT_SUPPORTED`, as the device reports |
+| 1, 2 | `GET_CONFIG`, `SET_CONFIG` | complete; passed to the firmware, whose supported set differs per protocol (`PROTOCOL.md` §8). Every parameter in the list is sent and the call returns the last one's status, as the vendor DLL does; an unsupported parameter answers `ERR_NOT_SUPPORTED` |
 | 3 | `READ_VBATT` | complete |
 | 4, 5 | `FIVE_BAUD_INIT`, `FAST_INIT` | the commands Tactrix's DLL sends, with `SBYTE_ARRAY` in/out for five-baud as the standard specifies; **untested on hardware**, needs a K-line vehicle |
 | 7, 8 | `CLEAR_TX_BUFFER`, `CLEAR_RX_BUFFER` | complete, host-side as in the vendor DLL |
-| 9, 10 | `CLEAR_PERIODIC_MSGS`, `CLEAR_MSG_FILTERS` | complete |
+| 9, 10 | `CLEAR_PERIODIC_MSGS`, `CLEAR_MSG_FILTERS` | complete: one `atl<ch>` or `atk<ch> -1`, as the vendor DLL sends them |
 | 11–13 | functional message table | `ERR_NOT_SUPPORTED`: J1850 only, which this hardware rejects |
 | 14 | `READ_PROG_VOLTAGE` | complete; reads pin 12, or the pin `pInput` points to as in Tactrix's DLL (8, 12, 16, or 17 for the adjustable supply) |
 
@@ -154,20 +154,32 @@ never exercised against a vehicle.
 Return codes follow the J2534-1 text where the vendor departs from it: any
 call before `PassThruOpen` or after `PassThruClose` returns
 `ERR_INVALID_DEVICE_ID`, a NULL message pointer returns `ERR_NULL_PARAMETER`,
-an unknown ioctl returns `ERR_INVALID_IOCTL_ID`. Programming voltage on a
-second pin, and grounding the K or L line under a channel that uses it, are
-refused (below); the vendor passes them to the cable. Everything else the two
-drivers put on the wire is the same, command for command
-([`docs/AB-OFFICIAL.md`](docs/AB-OFFICIAL.md)).
+an unknown ioctl returns `ERR_INVALID_IOCTL_ID`. A failed `PassThruWriteMsgs`
+reports in `pNumMsgs` how many messages went out; the vendor leaves the
+caller's count as it was.
+
+Refused before the wire, though the vendor passes them to the cable, because
+the firmware would act on them wrongly and the application could not tell:
+programming voltage on a second pin, and grounding the K or L line under a
+channel that uses it (below); CAN at rate 0, which the firmware opens; an
+ISO15765 message longer than 4099 bytes (4100 with extended addressing),
+which it tries to send; a periodic message too short or too long for its
+protocol, which it repeats. A message goes out on the channel it was written
+to, where the vendor picks the channel by the message's `ProtocolID`.
+
+The other differences a sweep of every parameter through both drivers finds
+on the cable are return codes, requests refused before the wire with the code
+the firmware itself would return, and one this driver accepts where the vendor
+refuses (a flow-control filter whose messages carry different TxFlags); all
+are listed in [`docs/AB-OFFICIAL.md`](docs/AB-OFFICIAL.md).
+The vendor DLL crashes the application on a NULL `GET_CONFIG`, `SET_CONFIG`
+or `FAST_INIT` input; this driver does not.
 
 ### Known gaps
 
 - **K-line frame layout** is implemented from three independent sources but
   not yet measured on this project's hardware (`PROTOCOL.md` §7). A bench
   ECU simulator with ISO 9141-2 and KWP2000 would settle it in an afternoon.
-- **Replies longer than one wire frame (250 bytes)** are reassembled the way
-  Tactrix's DLL reassembles them (the CAN id repeated in every chunk); no
-  capture of one from the cable exists yet.
 - The L-line and jack channels are wired to what Tactrix's DLL sends, but no
   L-line ECU or Innovate device has been attached to confirm their data.
 - A real ECU may ignore an **unpadded** ISO15765 request, so a caller must set

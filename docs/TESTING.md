@@ -188,7 +188,10 @@ chunk layout of long replies, and a `tbi` fallback nobody knew existed. It can
 also replay a recording of a real application (`OPENPORT_RECORD`) through both
 drivers and compare the wire command by command, payloads included, which is
 how the reflash tool's exact traffic is checked against the vendor without an
-ECU. See `docs/AB-OFFICIAL.md`.
+ECU. `AB_ARGS="-- sweep"` passes every connect, configuration, filter,
+transmit and periodic parameter once through both drivers and compares each
+step's wire commands; `-- edge` does the same for values J2534 forbids. See
+`docs/AB-OFFICIAL.md`.
 
 ## 6. Differential against the prior driver
 

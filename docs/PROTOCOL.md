@@ -158,7 +158,7 @@ means the verb does not exist: `atb atd ate ath atj atq atu`.
 | `atc<ch>` | | close a channel; stops its periodic messages; replies `aro` even for a channel that was never open |
 | `att<ch>` | `<len> <txflags> <timeout_us>` + payload | transmit. `<timeout_us>` is the firmware's budget for getting the message onto the bus; the vendor DLL sends the caller's `WriteMsgs` Timeout in microseconds (1 000 000 for a Timeout of 0). Without it the firmware gives up after ~1 s |
 | `atf<ch>` | `<type> <txflags> <len>` + payload | install a filter: type 1 PASS, 2 BLOCK, 3 FLOW_CONTROL; `<len>` is the length of **one** appended message and the device expects 2 or 3 of them; `atf6 3 0 12` with 12 bytes answers `are 10` and desynchronises the parser (§9.1) |
-| `atk<ch>` | `<filter_id>` | remove a filter; `are 22` for an unknown id |
+| `atk<ch>` | `<filter_id>` | remove a filter; `are 22` for an unknown id. `atk<ch> -1` removes every filter on the channel (`aro`, also with none installed; the old ids then answer `are 22`); it is the vendor DLL's `CLEAR_MSG_FILTERS` and this driver's. Filter ids are never reused within a session: they count up across all channels and restart at `ata`/`atz` (measured 2026-09-24) |
 | `atg<ch>` | `<param>` | read a configuration value (§8) |
 | `ats<ch>` | `<param> <value>` | write a configuration value |
 | `atm<ch>` | `<interval_us> 0 <txflags> <len>` + payload | **start a periodic message**; replies `arm<ch> <id>`; measured against a bench ECU (§10) |
@@ -167,7 +167,7 @@ means the verb does not exist: `atb atd ate ath atj atq atu`.
 | `atv` | ` <pin> <millivolts>` | programming voltage or ground on a pin (§8) |
 | `aty<ch>` | `<len> 0` + request bytes | K-line **fast** init; returns in ~108 ms with a 25/25 ms wake pulse |
 | `atw<ch>` | `<address>` (decimal, no payload) | K-line **five-baud** init, `atw3 51` for 0x33, as the vendor DLL sends it; blocks ~2450 ms, one byte clocked out at 5 baud |
-| `atl<ch>` | | answers `aro`; what it clears is unmeasured. The vendor DLL never sends it (`CLEAR_RX_BUFFER` is host-side there) and neither does this driver |
+| `atl<ch>` | | stop every periodic message on the channel: answers `aro`, and the old ids then answer `are 13` (measured 2026-09-24). The vendor DLL's `CLEAR_PERIODIC_MSGS` and this driver's |
 | `atp` | ` <pin> <value>` | a pin verb sharing `atv`'s argument shape (the vendor DLL's format-string table has one template, `at%c %d %d %u`, for `p` and `v`). Answers `are 10` for every pin and value tried (pins 0, 1, 2, 6, 12, 15; values 1, 5000, 8000, 12000, 20000, `SHORT_TO_GROUND`, `VOLTAGE_OFF`), `are 5` for value 0, after 0.3–1.3 s. Function unknown; the DLL is not seen sending it |
 | `atx<ch>` | `<n>` | exists, echoes its argument in the error (`are 7 1`); purpose unknown |
 
@@ -270,10 +270,12 @@ identity function. Confirmed by provoking each one:
 | transmit with no bus | `are 9` | `ERR_TIMEOUT` |
 | `atf6 3 0 12` (wrong payload length) | `are 10` | `ERR_INVALID_MSG` |
 | eleventh `atm` on a channel | `are 12` | `ERR_EXCEEDED_LIMIT` |
+| eleventh live `atf` on a channel | `are 12` | `ERR_EXCEEDED_LIMIT` |
 | `atn5 0` (no such periodic message) | `are 13` | `ERR_INVALID_MSG_ID` |
 | `atr 0` (not a readable pin) | `are 19` | `ERR_PIN_INVALID` |
 | second `ato` on one protocol | `are 20` | `ERR_CHANNEL_IN_USE` |
 | `atk6 1` (no such filter) | `are 22` | `ERR_INVALID_FILTER_ID` |
+| `atf5 0 …`, `atf5 4 …` (no such filter type) | `are 22` | `ERR_INVALID_FILTER_ID` |
 | `atv 12 20001` | `are 119` | Tactrix `ERR_OEM_VOLTAGE_TOO_HIGH` (0x77) |
 | `atv 12 4999` | `are 120` | Tactrix `ERR_OEM_VOLTAGE_TOO_LOW` (0x78) |
 
@@ -384,19 +386,28 @@ message on every write. J2534-1 §8.6 defines it: `TX_MSG_TYPE | TX_DONE`,
 DataSize 4`) and this driver deliver it. Periodic messages produce none
 (§10).
 
-### 7.6 Replies longer than one wire frame **[P]**
+### 7.6 Long replies arrive in 70-byte chunks **[V]**
 
-A payload longer than 250 bytes arrives as a `0x80` announcement, `0x00`
-middle chunks and a `0x40` last chunk, and **every chunk repeats the 4-byte
-CAN id**. Evidence: Tactrix's own DLL, fed a 600-byte reply with the id only
-in the first chunk, delivers 598 bytes; fed the id at the start of every
-chunk it delivers all 606 intact (`AB-OFFICIAL.md`). The DLL strips four
-bytes from every continuation chunk, so that is what its firmware sends;
-`opta-j2534-rs` strips the same way and was verified on a 2 MB transfer.
-This driver strips the id from every continuation chunk on ISO15765, as the
-DLL does. Still **[P]** because no capture of a reply longer than one wire
-frame from the cable exists yet; a `$23` read of 0xFF bytes would make it
-**[V]**.
+A segmented ISO15765 reply is forwarded as it arrives, **70 data bytes (ten
+consecutive frames) at a time, every chunk repeating the 4-byte CAN id**:
+a `0x80` announcement with the id only, `0x00` middle chunks, a `0x40` last
+chunk. Measured on the bench ECU of §10, 2026-09-24, over all 6 162
+segmented replies of a 512 KB `$23` read (a raw wire log, `OPENPORT_LOG_HEX=1`),
+every one in exactly this shape:
+
+| Message (id + data) | Chunks after the announcement |
+|---|---|
+| up to 69 B | one: id + all data |
+| 133 B (4 097 replies) | 73 + 64 |
+| 259 B | 73 + 74 + 74 + 50 |
+| 260 B (2 057 replies) | 73 + 74 + 74 + 51 |
+
+The first chunk carries the first frame's six data bytes and nine
+consecutive frames (id + 69), each later one ten (id + 70). The 250-byte limit
+of a wire frame is never reached. Tactrix's DLL strips four bytes from every
+continuation chunk (fed the id only in the first chunk it drops four bytes
+per chunk, `AB-OFFICIAL.md`), and so does this driver; the 512 KB image read
+this way matched two passes at different read sizes and an earlier dump.
 
 ### 7.7 Seeing your own transmit, and LOOPBACK **[V]**
 
@@ -413,9 +424,20 @@ message of four zero bytes, and so does this driver. On a bench with no bus
 a transmit still fails with `are 9` before any echo is produced: the echo
 follows a *successful* bus transmit.
 
-**Transmit echo on ISO15765** has only been seen on the bench, never on a
-bus. It is assumed to mirror receive: a `0xA0` announcement with the id, then
-`0x60` frames with the data, all flagged `TX_MSG_TYPE`. **[P]**
+**Transmit echo on ISO15765 is reported on raw CAN channel 5**, not on the
+ISO15765 channel, measured against the bench ECU of §10 on 2026-09-24 **[V]**. A
+single-frame request with `LOOPBACK` on the ISO15765 channel gave, in order:
+`ar5` `0x20` with four zero bytes (the echo of the request; a 20-byte request
+gave three, one per CAN frame the cable sent), `ar6` `0x10` with
+the CAN id (TxDone), and, while the ECU's segmented reply arrived, `ar5` `0x20`
+carrying the flow-control frame the cable sent, id and data intact
+(`00 00 07 b5 30 00 00 00 00 00 00 00`). Nothing is flagged on channel 6. With
+channel 5 open and a filter passing the request id, channel 5 also gets the
+ordinary `0x00` copies of both frames (as above). Tactrix's DLL delivers the
+`0x20` frames to the ISO15765 channel unchanged, `ProtocolID` CAN,
+`TX_MSG_TYPE`; with channel 5 also open it delivers every channel-5 frame to
+the ISO15765 channel and none to the CAN channel. This driver delivers them to
+the ISO15765 channel only while channel 5 is closed.
 
 ### 7.8 Raw CAN frames carry no START or END **[V]**
 
@@ -702,19 +724,17 @@ the bench), so the failure is the car, not the driver.
 | Question | What would close it |
 |---|---|
 | **K-line frame layout** (§7.9), the five-baud `arw` reply and a fast-init `ary` success | one K-line session recorded with `car_capture.py --kline`, or a bench OBD simulator that speaks ISO 9141-2 / KWP2000 |
-| **Chunking of a reply longer than 250 bytes** (§7.6) | a `$23` read of 0xFF bytes on an ECU that answers it |
-| **Transmit echo shape on ISO15765** with `LOOPBACK=1` (§7.7) | one padded transmit on a live bus with loopback on |
 | Whether the L line and the 2.5 mm jack carry data on channels 7–9 | an L-line ECU or an Innovate device |
 | Whether the firmware drives L on channels 3 and 4 | a scope on pin 15 during a five-baud init |
 | How extended addressing (`ISO15765_ADDR_TYPE`) is marked on receive | an ECU that uses it |
-| Whether filter ids are reused after `atk` (the driver tracks them in a 32-bit mask) | forty start/stop cycles over the CDC node |
 | The reattach at close on Linux (§1), as this driver does it | `examples/op_smoke` twice on a Linux machine, then `ls /dev/ttyACM*` |
 | `atx` and `atp` | unknown; neither is sent by the vendor DLL |
 
 Settled by measurement, for anyone checking a claim: the DLL's five-argument
 forms are accepted and the trailing number echoed (`ato6 0 500000 0 1` →
 `aro 1`); two-digit protocol numbers answer `are 3`; letter channel bytes
-answer `are 7`; `atv 12 -1` is accepted; `tbi` is silent.
+answer `are 7`; `atv 12 -1` is accepted; `tbi` is silent; filter ids are not
+reused within a session (33 start/stop cycles reached id 32, 2026-09-24).
 
 ---
 

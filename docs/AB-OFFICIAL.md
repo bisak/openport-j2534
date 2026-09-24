@@ -103,8 +103,8 @@ of this harness is what confirms it.
   write goes out numbered and unwaited, so the late reply is recognised and
   dropped instead of being mistaken for the next command's answer.
 - **`CLEAR_RX_BUFFER` touches the wire not at all** in the vendor DLL: it
-  clears the DLL's own receive queue. This driver does the same; `atl` exists
-  on the cable but what it clears is unmeasured.
+  clears the DLL's own receive queue. This driver does the same. `atl<ch>`
+  is `CLEAR_PERIODIC_MSGS` in both (parameter sweep, below).
 - **`atm` is the firmware's periodic message.** `PassThruStartPeriodicMsg`
   (100 ms) sends `atm6 100000 0 64 6 <seq>` + payload: interval in
   microseconds, a 0, TxFlags, length, sequence. `PassThruStopPeriodicMsg` sends
@@ -240,6 +240,140 @@ echoed on every reply (`arr 16 108 3`, `arf6 0 8`, `arg6 30 0 10`,
 no reply with either line ending; `atv 12 -1` is accepted. All four are in
 `PROTOCOL.md` and modelled in the simulator. Still open: the chunk layout of
 a >250-byte reply on the wire, which needs an ECU that sends one.
+
+## Parameter sweep
+
+Every finding above came from one parameter translated differently, and the
+scenarios pass only the parameters a typical session uses. The `sweep`
+scenarios pass each of the rest once: connect flags and rates, all J2534
+protocol ids, every configuration parameter on four channels (read, set to its
+J2534-1 default, read back), filter shapes and flags, transmit flags and
+sizes, periodic limits, list and K-line init variants.
+
+```bash
+make ab-official AB_ARGS="-- sweep"                                    # simulator
+make ab-official-cable CABLE=/dev/cu.usbmodemXXXX AB_ARGS="-- sweep"  # bench cable
+make ab-official-cable CABLE=/dev/cu.usbmodemXXXX AB_ARGS="-- edge"   # then, on its own
+```
+
+The sweep passes only values J2534 allows. Values it does not allow are a
+separate scenario, `edge`: CAN at rate 0, filter types 0 and 4, an eleventh
+filter, CAN frames of 0, 3 and 13 bytes, ISO15765 frames of 3 and 4100 bytes
+(and 4 with extended addressing), periodics every 4 ms and 65 536 s or 3
+bytes long, and a 260-byte K-line frame. This driver refuses most of them
+before the wire; the vendor DLL forwards all of them, so against the cable
+they are firmware input never tried before. None writes flash or switches a
+voltage, so the realistic worst case is a firmware that stops answering until
+it is unplugged. Run `edge` on its own and last, with nothing on the OBD
+connector: if the cable wedges, the tap's final command names the culprit,
+and no further `PassThruOpen` follows. The vendor's reopen of a silent cable
+sends `tbi`, a bootloader query whose answered path has never been seen. On
+2026-09-24 the cable answered every `edge` command and kept working.
+
+Each step is preceded by a marker call, `READ_PROG_VOLTAGE` with pin 17 in
+`pInput`, which both drivers send as `atr 17`. `ab_diff.py` cuts each wire
+capture at the markers and compares the commands of every step, payloads
+included (report section 2c). Transmits get a 100 ms budget so a bench cable
+fails them quickly. They carry only read-only requests (`$22`, `$3E`, OBD
+mode 1), so a run with the cable on a car changes nothing in the car.
+
+Results, DLL 1.02.0.4868, firmware 1.17.4877, 2026-09-24. Against the bench
+cable (12 V on pin 16, nothing else on the connector), after the changes
+below: the sweep's 670 steps, 648 identical on the wire, 22 not; `edge`'s 35
+steps, 23 identical. The cable answered every command of both and closed
+normally.
+Against the simulator the counts differ slightly, because the simulator
+acknowledges transmits that the bench cannot. The drivers agree on:
+
+- **Every configuration parameter** on ISO15765, CAN, ISO14230 and ISO9141
+  goes out as the same `atg`/`ats` with the same value. The vendor converts no
+  units: `P1_MAX` 40 is `ats4 7 40` from both drivers.
+- Every connect flag and rate both drivers accept, every J2534-2 channel id,
+  and every transmit flag (29-bit, extended addressing, `FRAME_PAD`,
+  `SW_CAN_HV_TX`, `WAIT_P3_MIN_ONLY`) produce the same commands.
+- The 4099-byte ISO15765 transmit, 29-bit and extended-addressing
+  flow-control filters, and K-line filters produce the same commands.
+- `CLEAR_MSG_FILTERS` and `CLEAR_PERIODIC_MSGS`, since the fix below.
+- `GET_CONFIG`/`SET_CONFIG` lists: the vendor sends every parameter and
+  returns the status of the last one (`[3, 127]` gives `ERR_NOT_SUPPORTED`,
+  `[127, 3]` gives 0). This driver stopped at the first failure, leaving the
+  rest unset and failing lists the vendor completes; it now does the same.
+- A flow-control message given with a PASS or BLOCK filter is ignored by both
+  (J2534-1 §7.2.9.2 calls it an error; refusing it failed applications that
+  pass a zeroed message rather than NULL).
+- Periodic intervals outside J2534's 5–65535 ms go to the firmware from both;
+  the cable runs 4 ms and 65 536 s.
+- The loopback echo of a raw CAN frame is delivered identically (simulator).
+
+**Fixed: filters survived `CLEAR_MSG_FILTERS`.** This driver sent `atk` for
+each filter id it had recorded, in a 32-bit mask at bit `id & 31`. The cable
+never reuses a filter id within a session: ids count up across every channel
+and restart only at `ata`/`atz`. So filter 32 shared filter 0's bit, and once
+filter 32 was stopped, `CLEAR_MSG_FILTERS` sent nothing, returned success and
+left filter 0 installed. Reproduced on the cable with 33 filter starts. The
+vendor sends one `atk<ch> -1`, which the cable answers `aro` and after which
+every old id answers `are 22`; for `CLEAR_PERIODIC_MSGS` it sends one
+`atl<ch>`, after which every old periodic id answers `are 13`. This driver now
+sends the same two commands, and keeps no filter table.
+
+They still differ here:
+
+| Case | Vendor | This driver |
+|---|---|---|
+| `GET_CONFIG` or `SET_CONFIG` with `pInput` NULL | **process dies** (read fault at address 0) | `ERR_NULL_PARAMETER` |
+| `FAST_INIT` with `pInput` NULL (J2534: wake-up pattern only) | **process dies** (write fault at 0x11) | `aty<ch> 0 0` |
+| A transmit the firmware times out (`are 9`, no ACK peer) | `ERR_TIMEOUT`, `NumMsgs` left as the caller set it: 3 for a three-message write that sent one `att` | `ERR_TIMEOUT` with `NumMsgs` 0, the number sent (J2534-1) |
+| Flow-control filter whose FC message has different TxFlags from mask and pattern | `ERR_FAILED`, nothing sent | installs it with the FC message's flags |
+| Message ProtocolID differs from the channel's | chooses the firmware channel by the message's ProtocolID: CAN on an ISO15765 channel goes out as `att5`; ISO15765 on a CAN channel returns `ERR_INVALID_PROTOCOL_ID` | sends on the channel it was given |
+| `CLEAR_FUNCT_MSG_LOOKUP_TABLE` | 0, nothing sent | `ERR_NOT_SUPPORTED` |
+| `edge`: connect at rate 0; ISO15765 write of 4100 bytes; a 3-byte CAN periodic | sent; the cable accepts all three (`aro`; the 4100-byte frame is attempted and times out; `arm`, and the malformed frame repeats) | refused before the wire (`ERR_INVALID_BAUDRATE`, `ERR_INVALID_MSG`): the firmware would act on them wrongly and the application could not tell |
+| `edge`: CAN writes of 0, 3 or 13 bytes; ISO15765 writes of 3 bytes, or 4 with extended addressing | sent; the cable answers `are 10` | refused before the wire; same return code |
+| `edge`: filter types 0 and 4 | sent; the cable answers `are 22`, `ERR_INVALID_FILTER_ID` | refused before the wire, `ERR_INVALID_MSG` |
+| J1850VPW/PWM connect, an eleventh periodic, an eleventh filter | sent; the cable answers `are 3`, `are 12`, `are 12` | J1850 and the periodic refused before the wire, same return code; the filter sent |
+| Mask and pattern of different lengths; NULL pattern; flow-control filter with no FC message; `FIVE_BAUD_INIT` with zero bytes | `ERR_FAILED`, `ERR_FAILED`, `ERR_FAILED`, `ERR_INVALID_MSG` | `ERR_INVALID_MSG`, `ERR_NULL_PARAMETER`, `ERR_NULL_PARAMETER`, `ERR_NULL_PARAMETER` |
+| `FIVE_BAUD_INIT` answered with a bare `aro` (the simulator's modelled reply) | 0 | `ERR_INIT_FAILED`: no key bytes means no init |
+
+The remaining wire differences follow from these. The firmware numbers filters
+and periodic messages in sequence, so one extra on one side shifts the ids
+every later `atk`/`atn` names; periodic ids keep counting across sessions
+while the cable is powered. Multi-message transmit budgets differ only by
+elapsed time. The sweep skips the three cases that crash the vendor DLL.
+
+## Against a live ECU
+
+The bench ECU of `PROTOCOL.md` §10 gives what the one-cable bench lacks: an
+acknowledging peer, real replies and a real bus. A replay (below) drove both
+drivers through the same read-only sequence against it, 2026-09-24, 12.1 V on
+pin 16 checked before and after: 300 ms of the module's own broadcast on a raw
+CAN channel; four session-less identification and status reads on ISO15765
+(12 to 22 bytes, all segmented); one read with `LOOPBACK` on; a firmware
+periodic TesterPresent for 3 s. The requests are the module's own read-only
+identification set; the probe files live with that module's tooling.
+
+Both drivers put identical commands on the wire and delivered every reply
+identically: the TxDone indication with the CAN id, the first-frame
+indication, the reassembled message, byte for byte, the same `RxStatus` and
+`ExtraDataIndex`. One difference, now fixed: with `LOOPBACK` on, the firmware
+reports the ISO15765 echoes on raw CAN channel 5 (`PROTOCOL.md` §7.7), the
+vendor delivers them to the ISO15765 channel, and this driver dropped them
+because channel 5 was not open. A tool that turns loopback on to watch its own
+requests saw nothing. It now gets the same two messages as from the vendor.
+Our copies arrive in wire order; the vendor puts the TxDone first, and the
+timestamps show which is the order they happened in.
+
+Multi-frame transmit, the path a reflash depends on and the one no earlier
+test reached on real hardware: requests of 10, 20 and 100 bytes (a first frame
+and up to 14 consecutive frames) that the module's firmware reads in full and
+then refuses on length, which its binary says it does for any request of that
+service longer than two bytes. The module's flow control asked for no block
+limit and no separation time. Both drivers put the same 190 payload bytes on
+the wire in the same commands, every request got its negative response, and a
+status read before and after returned the same bytes.
+
+With a raw CAN channel open beside the ISO15765 one, the vendor delivers every
+channel-5 frame, the echoes and the ordinary copies its filter passed, to the
+ISO15765 channel and none to the CAN channel. This driver keeps channel-5
+frames on the CAN channel.
 
 ## Replaying a real application through both drivers
 

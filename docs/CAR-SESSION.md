@@ -201,8 +201,8 @@ leaves the most valuable data captured.
 | Received-message framing with real payload | `q0`, `q1` | closed on the Caddy (`PROTOCOL.md` §7) |
 | **K-line frame layout** | `q2` (needs `--kline`; four init variants: EOBD 0x33 five-baud and fast, VAG 0x01 five-baud and fast; the init replies settle the `arw`/`ary` shapes too) | **open**: no K-line responder yet |
 | Is `att`'s third argument TxFlags, and is the DLL's five-argument form accepted? | `q3` | closed (§4) |
-| **Chunking of a reply longer than 250 bytes** | opt-in `--long-read ADDR`; not on this ECU (memory map unknown) | **open**; the vendor DLL's reading is implemented (§7.6) |
-| **Transmit echo shape** with LOOPBACK=1 on ISO15765 | `q9` | **open** |
+| **Chunking of a long reply** | opt-in `--long-read ADDR`; not on this ECU (memory map unknown) | closed on the bench ECU: 70-byte chunks, the id on each (§7.6) |
+| **Transmit echo shape** with LOOPBACK=1 on ISO15765 | `q9` | closed on the bench ECU: echoes on channel 5 (§7.7) |
 | **Raw CAN frame format** and what traffic reaches the port; does SNIFF_MODE open | `q10` (receive only) | closed (§7.8, §10) |
 | Which configuration ids the firmware knows, and their defaults | `q11` | closed (§8) |
 | The driver's own K-line path end to end (init ioctl, write, read) | `car-session.sh` step 7, `examples/op_kline` | **open**: no K-line responder yet |
