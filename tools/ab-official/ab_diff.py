@@ -9,7 +9,9 @@ Three views:
   1. Return codes and outputs per step: same scenario and step name, so the
      two runs line up by construction.
   2. Wire: the command verbs each library sent, normalised (sequence numbers,
-     timestamps and channel-independent noise stripped), diffed per scenario.
+     timestamps and channel-independent noise stripped), diffed per scenario;
+     every command in order (2b); and for the sweep scenarios, the commands
+     of each step, cut at j2534_trace's `atr 17` markers (2c).
   3. Timing: elapsed microseconds per step, both sides. The vendor side runs
      under emulation (box64 interpreter + Wine), so absolute numbers there are
      only meaningful for waits the DLL chooses (timeouts, retry intervals),
@@ -74,11 +76,13 @@ def parse_tap(path):
 PAYLOAD_VERBS = {"att": 0, "atm": 3, "aty": 0}   # index of the length argument; atw carries none
 
 
-def parse_stream(path):
+def parse_stream(path, flush=False):
     """Reassemble the host->device byte stream of a tap into a command list:
-    (verb, normalised args, payload bytes). Payload lengths come from the
-    command's own arguments, so a driver that writes line and payload in one
-    transfer and one that writes them in two parse identically."""
+    (verb, channel, normalised args, payload bytes). Payload lengths come from
+    the command's own arguments, so a driver that writes line and payload in
+    one transfer and one that writes them in two parse identically. With
+    flush, every empty line becomes a ("flush", ...) entry: both drivers open
+    a session with `\\r\\n\\r\\n`."""
     data = b"".join(bytes.fromhex(m.group(1).replace(" ", ""))
                     for line in open(path, encoding="utf-8", errors="replace")
                     for m in [re.match(r"\s*[\d.]+ H>D ([0-9a-f ]*) \|", line)] if m)
@@ -89,11 +93,13 @@ def parse_stream(path):
             break
         line = data[i:j].decode("latin-1"); i = j + 2
         if not line.strip():
+            if flush:
+                cmds.append(("flush", "", "", b""))
             continue
         cm = CMD_RE.match(line.encode("latin-1"))
         if not cm:
-            cmds.append(("?", line, b"")); continue
-        verb, args = cm.group(1).decode(), cm.group(3).decode("latin-1")
+            cmds.append(("?", "", line, b"")); continue
+        verb, ch, args = cm.group(1).decode(), cm.group(2).decode(), cm.group(3).decode("latin-1")
         a = args.split()
         n = 0
         if verb in PAYLOAD_VERBS and len(a) > PAYLOAD_VERBS[verb]:
@@ -101,8 +107,12 @@ def parse_stream(path):
         elif verb == "atf" and len(a) >= 3:
             n = int(a[2]) * (3 if a[0] == "3" else 2)
         payload = data[i:i + n]; i += n
-        cmds.append((verb, norm_args(verb, args), payload))
+        cmds.append((verb, ch, norm_args(verb, args), payload))
     return cmds
+
+
+def fmt_cmd(c):
+    return "`%s%s %s`" % (c[0], c[1], c[2]) + (" + %dB %s" % (len(c[3]), c[3][:12].hex(" ")) if c[3] else "")
 
 
 def wire_equivalence(vendor_tap, ours_tap, P):
@@ -111,33 +121,79 @@ def wire_equivalence(vendor_tap, ours_tap, P):
     stats["budget"] = 0
     o = parse_stream(ours_tap); obudget = stats["budget"]
     handshake = {"ati", "ata", "atz"}
-    # `atl` is what this driver sends for CLEAR_RX_BUFFER; the vendor clears
-    # only its host-side buffer. Harmless on the device (measured `aro`), so it
-    # is set aside like the handshake and reported, not hidden.
-    aside = handshake | {"atl"}
-    vb = [c for c in v if c[0] not in aside]; ob = [c for c in o if c[0] not in aside]
-    vatl = sum(1 for c in v if c[0] == "atl"); oatl = sum(1 for c in o if c[0] == "atl")
+    vb = [c for c in v if c[0] not in handshake]; ob = [c for c in o if c[0] not in handshake]
     P("## 2b. Wire equivalence (every command with its payload, in order)\n")
     P("| | vendor | ours |")
     P("|---|---|---|")
     P("| commands on the wire | %d | %d |" % (len(v), len(o)))
     P("| of which open/close handshake (`ati`/`ata`/`atz`) | %d | %d |" % (sum(1 for c in v if c[0] in handshake), sum(1 for c in o if c[0] in handshake)))
-    P("| of which `atl` (CLEAR_RX_BUFFER) | %d | %d |" % (vatl, oatl))
     P("| transmits carrying the vendor's constant 1000000 budget argument | %d | %d |" % (vbudget, obudget))
     P("| compared (everything else) | %d | %d |" % (len(vb), len(ob)))
-    P("| payload bytes | %d | %d |" % (sum(len(c[2]) for c in v), sum(len(c[2]) for c in o)))
+    P("| payload bytes | %d | %d |" % (sum(len(c[3]) for c in v), sum(len(c[3]) for c in o)))
     if vb == ob:
-        P("\n**IDENTICAL**: apart from the handshake, `atl`, and the budget argument (all known and documented in PROTOCOL.md section 4), both drivers sent the same %d commands with the same arguments and the same %d payload bytes, in the same order.\n"
-          % (len(vb), sum(len(c[2]) for c in vb)))
+        P("\n**IDENTICAL**: apart from the handshake and the budget argument (all known and documented in PROTOCOL.md section 4), both drivers sent the same %d commands with the same arguments and the same %d payload bytes, in the same order.\n"
+          % (len(vb), sum(len(c[3]) for c in vb)))
         return True
     k = next((i for i, (x, y) in enumerate(zip(vb, ob)) if x != y), min(len(vb), len(ob)))
     P("\n**DIFFERENT**: first divergence at command %d of %d/%d:\n" % (k + 1, len(vb), len(ob)))
     for i in range(max(0, k - 2), min(k + 3, max(len(vb), len(ob)))):
         x = vb[i] if i < len(vb) else None; y = ob[i] if i < len(ob) else None
-        fmt = lambda c: "`%s %s` + %dB %s" % (c[0], c[1], len(c[2]), c[2][:12].hex(" ")) if c else "-"
-        P("- %d: vendor %s / ours %s" % (i + 1, fmt(x), fmt(y)))
+        P("- %d: vendor %s / ours %s" % (i + 1, fmt_cmd(x) if x else "-", fmt_cmd(y) if y else "-"))
     P("")
     return False
+
+
+def is_marker(c):
+    """j2534_trace's sweep marker: READ_PROG_VOLTAGE on PIN_VADJ, `atr 17`."""
+    return c[0] == "atr" and c[2].split()[:1] == ["17"]
+
+
+def segments(cmds):
+    """The commands after each sweep marker, up to the next marker or the
+    line flush that opens a new session, with the markers' own `atr 17`
+    removed."""
+    segs, cur = [], None
+    for c in cmds:
+        if is_marker(c):
+            cur = []; segs.append(cur)
+        elif c[0] == "flush":
+            cur = None
+        elif cur is not None:
+            cur.append(c)
+    return segs
+
+
+def wire_per_step(vendor_tap, ours_tap, vs, os_, keys, P):
+    """Sweep steps carry a "mark": n; the wire between marker n and the next
+    is that step's. Compare them step by step."""
+    marked = [k for k in keys if k in vs and k in os_ and "mark" in vs[k][0] and "mark" in os_[k][0]]
+    if not marked:
+        return
+    vseg, oseg = segments(parse_stream(vendor_tap, flush=True)), segments(parse_stream(ours_tap, flush=True))
+    P("## 2c. Wire per step (sweep scenarios)\n")
+    vmax = max(x[0]["mark"] for x in vs.values() if "mark" in x[0])
+    omax = max(x[0]["mark"] for x in os_.values() if "mark" in x[0])
+    if len(vseg) != vmax or len(oseg) != omax:
+        P("**Markers do not line up** (vendor: %d in the trace, %d on the wire; ours: %d, %d). A library "
+          "refused the marker call somewhere, so the attribution below is unreliable from that point.\n"
+          % (vmax, len(vseg), omax, len(oseg)))
+    same, rows = 0, []
+    for key in marked:
+        vi, oi = vs[key][0]["mark"] - 1, os_[key][0]["mark"] - 1
+        vc = vseg[vi] if vi < len(vseg) else None
+        oc = oseg[oi] if oi < len(oseg) else None
+        if vc == oc:
+            same += 1
+            continue
+        show = lambda cs: "<br>".join(fmt_cmd(c) for c in cs) if cs else ("nothing" if cs is not None else "?")
+        rows.append("| %s | %s | %s | %s |" % (key[0], key[1], show(vc), show(oc)))
+    P("%d marked step(s): %d put the same commands on the wire, %d did not.\n" % (len(marked), same, len(rows)))
+    if rows:
+        P("| scenario | step | vendor | ours |")
+        P("|---|---|---|---|")
+        for r in rows:
+            P(r)
+        P("")
 
 
 KNOWN_ARGS = {"ato": 3, "att": 2, "atf": 3, "ats": 2, "atk": 1, "atc": 0, "atg": 1, "atz": 0, "ata": 0,
@@ -200,9 +256,13 @@ def main():
         note = []
         if v["rc"] != o["rc"]:
             note.append("**rc differs**")
-        for f in ("received", "sent", "vbatt", "firmware", "api", "ch", "filter", "msgid"):
+        for f in ("received", "sent", "vbatt", "firmware", "api", "values"):
             if f in v and f in o and v[f] != o[f]:
                 note.append("%s %r vs %r" % (f, v[f], o[f]))
+        # Channel, filter and message ids are handles the caller must treat as
+        # opaque: shown, not counted as a divergence.
+        handles = ["%s %r vs %r (handle)" % (f, v[f], o[f]) for f in ("ch", "filter", "msgid")
+                   if f in v and f in o and v[f] != o[f]]
         vm, om = v.get("msgs", []), o.get("msgs", [])
         if vm or om:
             def shape(ms): return ["rx=%#x size=%d data=%s" % (m["rx"], m["size"], m["data"][:24] + ("…" if len(m["data"]) > 24 else "")) for m in ms]
@@ -210,7 +270,7 @@ def main():
                 note.append("msgs: vendor %s / ours %s" % (shape(vm), shape(om)))
         if note:
             diverge += 1
-        P("| %s | %s | %s | %s | %s |" % (key[0], key[1], fmt_rc(v), fmt_rc(o), "; ".join(note)))
+        P("| %s | %s | %s | %s | %s |" % (key[0], key[1], fmt_rc(v), fmt_rc(o), "; ".join(note + handles)))
     P("\n%d step(s) diverge.\n" % diverge)
 
     # 2. wire
@@ -242,6 +302,7 @@ def main():
 
     if args.tap:
         wire_equivalence(args.tap[0], args.tap[1], P)
+        wire_per_step(args.tap[0], args.tap[1], vs, os_, keys, P)
 
     # 3. timing
     P("## 3. Timing per step (microseconds; vendor under emulation)\n")

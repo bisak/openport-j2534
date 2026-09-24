@@ -18,7 +18,8 @@
  * whether the libraries did the same things.
  *
  * Scenarios: open iso15765 multiframe timeouts errors periodic raw_can kline bench
- * (default: all but kline and bench, which take tens of seconds).
+ * sweep_connect sweep_config sweep_filter sweep_tx ("sweep" runs all four) edge
+ * (default: all but kline, bench, the sweeps and edge).
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -66,6 +67,7 @@ static struct {
 
 static FILE *out;
 static int   seq;
+static int   mark_pending;     /* set by mark() (sweep section), consumed by record() */
 
 /* ---- platform ---------------------------------------------------------- */
 #ifdef _WIN32
@@ -115,6 +117,7 @@ static long record(const char *scenario, const char *step, long rc, double t0, c
     err[0] = 0;
     fprintf(out, "{\"i\":%d,\"scenario\":\"%s\",\"step\":\"%s\",\"rc\":%ld,\"us\":%.0f",
             ++seq, scenario, step, rc, dt);
+    if (mark_pending) { fprintf(out, ",\"mark\":%d", mark_pending); mark_pending = 0; }
     if (rc != 0 && api.lasterr) {
         memset(err, 0, sizeof err);
         api.lasterr(err);
@@ -598,6 +601,491 @@ static void replay(const char *path)
     fclose(f);
 }
 
+/* ---- sweep --------------------------------------------------------------
+ * The parameters the scenarios above never pass, each once: connect flags and
+ * rates, every configuration parameter, filter shapes and flags, transmit
+ * flags and sizes, periodic and K-line init variants. The vendor DLL's A/B
+ * finds so far were all one parameter translated differently, so this is
+ * where the next ones are. Every step is preceded by a marker call that both
+ * libraries put on the wire identically, `atr 17` (READ_PROG_VOLTAGE on
+ * PIN_VADJ with the pin in pInput, PROTOCOL.md section 8.1); ab_diff.py cuts
+ * the wire at the markers and compares each step's commands. Transmits get a
+ * 100 ms budget so a bench cable, where nothing acknowledges, fails them fast,
+ * and carry only read-only requests (0x22, 0x3E, OBD mode 1), so a run with the
+ * cable on a car changes nothing in it. */
+static J_U32 mark_dev;
+static int   marks;
+
+static void mark(void)
+{
+    J_U32 pin = PIN_VADJ, v = 0;
+    api.ioctl(mark_dev, READ_PROG_VOLTAGE, &pin, &v);
+    mark_pending = ++marks;
+}
+
+static PASSTHRU_MSG *hexmsg(PASSTHRU_MSG *m, J_U32 proto, J_U32 flags, const char *hex)
+{
+    if (hex == NULL) return NULL;
+    memset(m, 0, sizeof *m);
+    m->ProtocolID = proto; m->TxFlags = flags;
+    m->DataSize = (J_U32)hex_to_bytes(hex, m->Data, sizeof m->Data);
+    return m;
+}
+
+static long sw_connect(const char *sc, const char *name, J_U32 proto, J_U32 flags, J_U32 baud, J_U32 *ch)
+{
+    long rc; double t0; char d[128];
+    *ch = 0; mark(); t0 = now_us();
+    rc = api.connect(mark_dev, proto, flags, baud, ch);
+    snprintf(d, sizeof d, "\"proto\":%lu,\"flags\":%lu,\"baud\":%lu,\"ch\":%lu",
+             (unsigned long)proto, (unsigned long)flags, (unsigned long)baud, (unsigned long)*ch);
+    return record(sc, name, rc, t0, d);
+}
+
+static void sw_disconnect(const char *sc, const char *what, J_U32 ch)
+{
+    char name[96];
+    snprintf(name, sizeof name, "%s Disconnect", what);
+    mark(); STEP(sc, name, api.disconnect(ch), NULL);
+}
+
+#define UNTOUCHED 0xDEADBEEFUL   /* GET_CONFIG input value; still there means never written */
+
+static long sw_config(const char *sc, const char *name, J_U32 ch, J_U32 ioctl_id, const SCONFIG *in, J_U32 n)
+{
+    SCONFIG cfg[8]; SCONFIG_LIST list; long rc; double t0; char d[256]; J_U32 i;
+    if (n > 8) n = 8;
+    memcpy(cfg, in, n * sizeof *cfg);
+    list.NumOfParams = n; list.ConfigPtr = cfg;
+    mark(); t0 = now_us();
+    rc = api.ioctl(ch, ioctl_id, &list, NULL);
+    snprintf(d, sizeof d, "\"values\":\"");
+    for (i = 0; i < n; i++)
+        snprintf(d + strlen(d), sizeof d - strlen(d), "%s%lu=%lu", i ? "," : "",
+                 (unsigned long)cfg[i].Parameter, (unsigned long)cfg[i].Value);
+    strncat(d, "\"", sizeof d - strlen(d) - 1);
+    return record(sc, name, rc, t0, d);
+}
+
+static long sw_ioctl(const char *sc, const char *name, J_U32 ch, J_U32 id, const void *in, void *outp)
+{
+    long rc; double t0;
+    mark(); t0 = now_us();
+    rc = api.ioctl(ch, id, in, outp);
+    return record(sc, name, rc, t0, NULL);
+}
+
+/* Starts a filter; unless keep, stops it again at once so every case meets an
+ * empty channel. */
+static long sw_filter(const char *sc, const char *name, J_U32 ch, J_U32 type, const PASSTHRU_MSG *mask,
+                      const PASSTHRU_MSG *pat, const PASSTHRU_MSG *fc, int keep)
+{
+    long rc; double t0; char d[48], stop[128]; J_U32 fid = 0;
+    mark(); t0 = now_us();
+    rc = api.filter(ch, type, mask, pat, fc, &fid);
+    snprintf(d, sizeof d, "\"filter\":%lu", (unsigned long)fid);
+    record(sc, name, rc, t0, d);
+    if (rc == 0 && !keep) {
+        snprintf(stop, sizeof stop, "%s StopMsgFilter", name);
+        mark(); STEP(sc, stop, api.stopf(ch, fid), NULL);
+    }
+    return rc;
+}
+
+static long sw_write(const char *sc, const char *name, J_U32 ch, const PASSTHRU_MSG *m, J_U32 n)
+{
+    long rc; double t0; char d[64]; J_U32 cnt = n;
+    mark(); t0 = now_us();
+    rc = api.write(ch, m, &cnt, 100);
+    snprintf(d, sizeof d, "\"sent\":%lu,\"timeout\":100", (unsigned long)cnt);
+    return record(sc, name, rc, t0, d);
+}
+
+/* Starts a periodic message; unless keep, stops it again at once. */
+static long sw_periodic(const char *sc, const char *name, J_U32 ch, const PASSTHRU_MSG *m, J_U32 interval, int keep)
+{
+    long rc; double t0; char d[64], stop[128]; J_U32 id = 0;
+    mark(); t0 = now_us();
+    rc = api.startp(ch, m, &id, interval);
+    snprintf(d, sizeof d, "\"msgid\":%lu,\"interval\":%lu", (unsigned long)id, (unsigned long)interval);
+    record(sc, name, rc, t0, d);
+    if (rc == 0 && !keep) {
+        snprintf(stop, sizeof stop, "%s StopPeriodicMsg", name);
+        mark(); STEP(sc, stop, api.stopp(ch, id), NULL);
+    }
+    return rc;
+}
+
+static int sw_open(const char *sc)
+{
+    if (do_open(sc, &mark_dev) != 0) return -1;
+    return 0;
+}
+
+static void sw_close(const char *sc)
+{
+    mark(); STEP(sc, "PassThruClose", api.close(mark_dev), NULL);
+}
+
+static const struct { J_U32 proto, flags, baud; const char *name; } SW_CONNECTS[] = {
+    { CAN, 0, 125000, "CAN 125000" }, { CAN, 0, 250000, "CAN 250000" }, { CAN, 0, 1000000, "CAN 1000000" },
+    { CAN, 0, 33333, "CAN 33333" }, { CAN, 0, 12345, "CAN 12345" },
+    { CAN, CAN_29BIT_ID, 500000, "CAN CAN_29BIT_ID" }, { CAN, CAN_ID_BOTH, 500000, "CAN CAN_ID_BOTH" },
+    { CAN, CAN_29BIT_ID | CAN_ID_BOTH, 500000, "CAN CAN_29BIT_ID+CAN_ID_BOTH" },
+    { CAN, 0x20000000, 500000, "CAN undefined flag 0x20000000" },
+    { ISO15765, 0, 250000, "ISO15765 250000" }, { ISO15765, CAN_29BIT_ID, 500000, "ISO15765 CAN_29BIT_ID" },
+    { ISO15765, CAN_ID_BOTH, 500000, "ISO15765 CAN_ID_BOTH" },
+    { ISO14230, 0, 10400, "ISO14230 10400" }, { ISO14230, 0, 9600, "ISO14230 9600" },
+    { ISO14230, 0, 4800, "ISO14230 4800" }, { ISO14230, ISO9141_NO_CHECKSUM, 10400, "ISO14230 ISO9141_NO_CHECKSUM" },
+    { ISO14230, ISO9141_K_LINE_ONLY, 10400, "ISO14230 ISO9141_K_LINE_ONLY" },
+    { ISO9141, 0, 10400, "ISO9141 10400" }, { ISO9141, 0, 4800, "ISO9141 4800" },
+    { ISO9141, ISO9141_NO_CHECKSUM, 10400, "ISO9141 ISO9141_NO_CHECKSUM" },
+    { ISO9141, ISO9141_K_LINE_ONLY, 10400, "ISO9141 ISO9141_K_LINE_ONLY" },
+    { J1850VPW, 0, 10400, "J1850VPW 10400" }, { J1850PWM, 0, 41600, "J1850PWM 41600" },
+    { CAN_CH1, 0, 500000, "CAN_CH1" }, { ISO15765_CH1, 0, 500000, "ISO15765_CH1" },
+    { ISO9141_CH1, 0, 10400, "ISO9141_CH1" }, { ISO9141_CH2, 0, 10400, "ISO9141_CH2" },
+    { ISO9141_CH3, 0, 19200, "ISO9141_CH3 19200" }, { ISO14230_CH1, 0, 10400, "ISO14230_CH1" },
+    { ISO14230_CH2, 0, 10400, "ISO14230_CH2" },
+};
+
+static void sc_sweep_connect(void)
+{
+    const char *sc = "sweep_connect";
+    unsigned i; J_U32 ch;
+    if (sw_open(sc) != 0) return;
+    for (i = 0; i < sizeof SW_CONNECTS / sizeof SW_CONNECTS[0]; i++)
+        if (sw_connect(sc, SW_CONNECTS[i].name, SW_CONNECTS[i].proto, SW_CONNECTS[i].flags, SW_CONNECTS[i].baud, &ch) == 0)
+            sw_disconnect(sc, SW_CONNECTS[i].name, ch);
+    sw_close(sc);
+}
+
+/* Values are J2534-1 defaults, in J2534 units (P1_MAX, P3_MIN and P4_MIN in
+ * 0.5 ms), so a driver that converts units and one that does not put
+ * different numbers on the wire. DATA_RATE is set to the channel's own rate. */
+static const struct { J_U32 id, value; const char *name; } SW_PARAMS[] = {
+    { DATA_RATE, 0, "DATA_RATE" }, { LOOPBACK, 0, "LOOPBACK" }, { NODE_ADDRESS, 0, "NODE_ADDRESS" },
+    { NETWORK_LINE, 0, "NETWORK_LINE" }, { P1_MIN, 0, "P1_MIN" }, { P1_MAX, 40, "P1_MAX" },
+    { P2_MIN, 0, "P2_MIN" }, { P2_MAX, 0, "P2_MAX" }, { P3_MIN, 110, "P3_MIN" }, { P3_MAX, 0, "P3_MAX" },
+    { P4_MIN, 10, "P4_MIN" }, { P4_MAX, 0, "P4_MAX" }, { W1, 300, "W1" }, { W2, 20, "W2" }, { W3, 20, "W3" },
+    { W4, 50, "W4" }, { W5, 300, "W5" }, { TIDLE, 300, "TIDLE" }, { TINIL, 25, "TINIL" }, { TWUP, 50, "TWUP" },
+    { PARITY, 0, "PARITY" }, { BIT_SAMPLE_POINT, 80, "BIT_SAMPLE_POINT" }, { SYNC_JUMP_WIDTH, 15, "SYNC_JUMP_WIDTH" },
+    { W0, 300, "W0" }, { T1_MAX, 20, "T1_MAX" }, { T2_MAX, 100, "T2_MAX" }, { T4_MAX, 20, "T4_MAX" },
+    { T5_MAX, 100, "T5_MAX" }, { ISO15765_BS, 0, "ISO15765_BS" }, { ISO15765_STMIN, 0, "ISO15765_STMIN" },
+    { DATA_BITS, 0, "DATA_BITS" }, { FIVE_BAUD_MOD, 0, "FIVE_BAUD_MOD" }, { BS_TX, 0xFFFF, "BS_TX" },
+    { STMIN_TX, 0xFFFF, "STMIN_TX" }, { T3_MAX, 50, "T3_MAX" }, { ISO15765_WFT_MAX, 0, "ISO15765_WFT_MAX" },
+    { ISO15765_PAD_VALUE, 0, "ISO15765_PAD_VALUE" }, { CAN_MIXED_FORMAT, 0, "CAN_MIXED_FORMAT" },
+    { TX_PARAM_STOP_BITS, 1, "TX_PARAM_STOP_BITS" },
+};
+
+static const struct { J_U32 proto, baud; const char *name; } SW_CHANNELS[] = {
+    { ISO15765, 500000, "ISO15765" }, { CAN, 500000, "CAN" }, { ISO14230, 10400, "ISO14230" }, { ISO9141, 10400, "ISO9141" },
+};
+
+static void sc_sweep_config(void)
+{
+    const char *sc = "sweep_config";
+    unsigned c, i; J_U32 ch; char name[96];
+    if (sw_open(sc) != 0) return;
+    for (c = 0; c < sizeof SW_CHANNELS / sizeof SW_CHANNELS[0]; c++) {
+        const char *pn = SW_CHANNELS[c].name;
+        snprintf(name, sizeof name, "%s Connect", pn);
+        if (sw_connect(sc, name, SW_CHANNELS[c].proto, 0, SW_CHANNELS[c].baud, &ch) != 0) continue;
+        for (i = 0; i < sizeof SW_PARAMS / sizeof SW_PARAMS[0]; i++) {
+            SCONFIG get = { SW_PARAMS[i].id, UNTOUCHED }, set = { SW_PARAMS[i].id, SW_PARAMS[i].value };
+            if (set.Parameter == DATA_RATE) set.Value = SW_CHANNELS[c].baud;
+            snprintf(name, sizeof name, "%s %s get", pn, SW_PARAMS[i].name);
+            sw_config(sc, name, ch, GET_CONFIG, &get, 1);
+            snprintf(name, sizeof name, "%s %s set %lu", pn, SW_PARAMS[i].name, (unsigned long)set.Value);
+            sw_config(sc, name, ch, SET_CONFIG, &set, 1);
+            snprintf(name, sizeof name, "%s %s get after set", pn, SW_PARAMS[i].name);
+            sw_config(sc, name, ch, GET_CONFIG, &get, 1);
+        }
+        if (SW_CHANNELS[c].proto == ISO15765) {
+            SCONFIG r250 = { DATA_RATE, 250000 }, r500 = { DATA_RATE, 500000 }, g = { DATA_RATE, UNTOUCHED };
+            SCONFIG gl[3] = { { DATA_RATE, UNTOUCHED }, { 0x7F, UNTOUCHED }, { LOOPBACK, UNTOUCHED } };
+            SCONFIG sl[3] = { { LOOPBACK, 0 }, { 0x7F, 0 }, { ISO15765_BS, 0 } };
+            SCONFIG lb1 = { LOOPBACK, 1 }, lb0 = { LOOPBACK, 0 }, glb = { LOOPBACK, UNTOUCHED };
+            sw_config(sc, "ISO15765 DATA_RATE set 250000", ch, SET_CONFIG, &r250, 1);
+            sw_config(sc, "ISO15765 DATA_RATE get after 250000", ch, GET_CONFIG, &g, 1);
+            sw_config(sc, "ISO15765 DATA_RATE set 500000 again", ch, SET_CONFIG, &r500, 1);
+            sw_config(sc, "ISO15765 LOOPBACK set 1", ch, SET_CONFIG, &lb1, 1);
+            sw_config(sc, "ISO15765 LOOPBACK get after 1", ch, GET_CONFIG, &glb, 1);
+            sw_config(sc, "ISO15765 LOOPBACK set 0", ch, SET_CONFIG, &lb0, 1);
+            sw_config(sc, "ISO15765 GET list DATA_RATE,0x7F,LOOPBACK", ch, GET_CONFIG, gl, 3);
+            sw_config(sc, "ISO15765 SET list LOOPBACK,0x7F,ISO15765_BS", ch, SET_CONFIG, sl, 3);
+            sw_config(sc, "ISO15765 GET empty list", ch, GET_CONFIG, gl, 0);
+            /* GET_CONFIG or SET_CONFIG with a NULL pInput is not swept: the
+             * vendor DLL dereferences it and the process dies (page fault at
+             * address 0, 1.02.0.4868, 2026-09-24). This driver answers
+             * ERR_NULL_PARAMETER. */
+            sw_config(sc, "GET_CONFIG DATA_RATE on the device id", mark_dev, GET_CONFIG, &g, 1);
+        }
+        snprintf(name, sizeof name, "%s", pn);
+        sw_disconnect(sc, name, ch);
+    }
+    sw_close(sc);
+}
+
+/* One filter case: the message strings are hex, NULL for a NULL pointer. mproto
+ * 0 means the channel's own protocol. */
+typedef struct { const char *name; J_U32 type, mproto, mflags, fflags; const char *mask, *pat, *fc; } sw_fcase;
+
+static const sw_fcase SW_CAN_FILTERS[] = {
+    { "PASS 11-bit 7E8", PASS_FILTER, 0, 0, 0, "00000fff", "000007e8", NULL },
+    { "BLOCK 11-bit 7E8", BLOCK_FILTER, 0, 0, 0, "00000fff", "000007e8", NULL },
+    { "PASS 29-bit with CAN_29BIT_ID", PASS_FILTER, 0, CAN_29BIT_ID, 0, "1fffffff", "18daf110", NULL },
+    { "PASS 29-bit without CAN_29BIT_ID", PASS_FILTER, 0, 0, 0, "1fffffff", "18daf110", NULL },
+    { "PASS 1 byte", PASS_FILTER, 0, 0, 0, "00", "00", NULL },
+    { "PASS 12 bytes", PASS_FILTER, 0, 0, 0, "00000fff0000000000000000", "000007e80000000000000000", NULL },
+    { "PASS 13 bytes", PASS_FILTER, 0, 0, 0, "00000fff000000000000000000", "000007e8000000000000000000", NULL },
+    { "PASS with a flow-control message", PASS_FILTER, 0, 0, 0, "00000fff", "000007e8", "000007e0" },
+    { "FLOW_CONTROL on a CAN channel", FLOW_CONTROL_FILTER, 0, 0, 0, "ffffffff", "000007e8", "000007e0" },
+    { "mask 4 bytes, pattern 5", PASS_FILTER, 0, 0, 0, "00000fff", "000007e800", NULL },
+    { "NULL pattern", PASS_FILTER, 0, 0, 0, "00000fff", NULL, NULL },
+    { "mask ProtocolID ISO15765", PASS_FILTER, ISO15765, 0, 0, "00000fff", "000007e8", NULL },
+};
+
+static const sw_fcase SW_ISO_FILTERS[] = {
+    { "FC 11-bit, FRAME_PAD on all three", FLOW_CONTROL_FILTER, 0, ISO15765_FRAME_PAD, ISO15765_FRAME_PAD, "ffffffff", "000007e8", "000007e0" },
+    { "FC 11-bit, FRAME_PAD on the FC message only", FLOW_CONTROL_FILTER, 0, 0, ISO15765_FRAME_PAD, "ffffffff", "000007e8", "000007e0" },
+    { "FC 11-bit, FRAME_PAD on mask and pattern only", FLOW_CONTROL_FILTER, 0, ISO15765_FRAME_PAD, 0, "ffffffff", "000007e8", "000007e0" },
+    { "FC 29-bit", FLOW_CONTROL_FILTER, 0, CAN_29BIT_ID | ISO15765_FRAME_PAD, CAN_29BIT_ID | ISO15765_FRAME_PAD, "1fffffff", "18daf110", "18da10f1" },
+    { "FC extended addressing", FLOW_CONTROL_FILTER, 0, ISO15765_ADDR_TYPE | ISO15765_FRAME_PAD, ISO15765_ADDR_TYPE | ISO15765_FRAME_PAD, "ffffffffff", "00000612f1", "000006f112" },
+    { "FC ISO15765_ADDR_TYPE with 4-byte messages", FLOW_CONTROL_FILTER, 0, ISO15765_ADDR_TYPE | ISO15765_FRAME_PAD, ISO15765_ADDR_TYPE | ISO15765_FRAME_PAD, "ffffffff", "000007e8", "000007e0" },
+    { "FC with a NULL flow-control message", FLOW_CONTROL_FILTER, 0, ISO15765_FRAME_PAD, 0, "ffffffff", "000007e8", NULL },
+    { "PASS on ISO15765", PASS_FILTER, 0, 0, 0, "ffffffff", "000007e8", NULL },
+    { "BLOCK on ISO15765", BLOCK_FILTER, 0, 0, 0, "ffffffff", "000007e8", NULL },
+    { "FC mask ProtocolID CAN", FLOW_CONTROL_FILTER, CAN, ISO15765_FRAME_PAD, ISO15765_FRAME_PAD, "ffffffff", "000007e8", "000007e0" },
+};
+
+static const sw_fcase SW_KLINE_FILTERS[] = {
+    { "PASS 1 byte", PASS_FILTER, 0, 0, 0, "c0", "80", NULL },
+    { "PASS 3 bytes", PASS_FILTER, 0, 0, 0, "ffffff", "80f110", NULL },
+    { "BLOCK 1 byte", BLOCK_FILTER, 0, 0, 0, "c0", "80", NULL },
+    { "FLOW_CONTROL on ISO14230", FLOW_CONTROL_FILTER, 0, 0, 0, "ffffff", "80f110", "8010f1" },
+};
+
+static void sw_filter_cases(const char *sc, const char *pn, J_U32 ch, J_U32 proto, const sw_fcase *cs, unsigned n)
+{
+    static PASSTHRU_MSG m, p, f;
+    unsigned i; char name[128];
+    for (i = 0; i < n; i++) {
+        J_U32 mp = cs[i].mproto ? cs[i].mproto : proto;
+        snprintf(name, sizeof name, "%s %s", pn, cs[i].name);
+        sw_filter(sc, name, ch, cs[i].type, hexmsg(&m, mp, cs[i].mflags, cs[i].mask),
+                  hexmsg(&p, mp, cs[i].mflags, cs[i].pat), hexmsg(&f, proto, cs[i].fflags, cs[i].fc), 0);
+    }
+}
+
+static void sc_sweep_filter(void)
+{
+    const char *sc = "sweep_filter";
+    static PASSTHRU_MSG m, p, f;
+    J_U32 ch; unsigned i; char name[96], pat[16];
+    if (sw_open(sc) != 0) return;
+    if (sw_connect(sc, "CAN Connect", CAN, 0, 500000, &ch) == 0) {
+        sw_filter_cases(sc, "CAN", ch, CAN, SW_CAN_FILTERS, sizeof SW_CAN_FILTERS / sizeof SW_CAN_FILTERS[0]);
+        for (i = 0; i < 2; i++) {
+            snprintf(name, sizeof name, "CAN PASS filter %u of 2", i + 1);
+            snprintf(pat, sizeof pat, "000007%02x", 0xE0 + i);
+            sw_filter(sc, name, ch, PASS_FILTER, hexmsg(&m, CAN, 0, "00000fff"), hexmsg(&p, CAN, 0, pat), NULL, 1);
+        }
+        sw_ioctl(sc, "CAN CLEAR_MSG_FILTERS with 2 set", ch, CLEAR_MSG_FILTERS, NULL, NULL);
+        sw_ioctl(sc, "CAN CLEAR_MSG_FILTERS with none set", ch, CLEAR_MSG_FILTERS, NULL, NULL);
+        sw_disconnect(sc, "CAN", ch);
+    }
+    if (sw_connect(sc, "ISO15765 Connect", ISO15765, 0, 500000, &ch) == 0) {
+        sw_filter_cases(sc, "ISO15765", ch, ISO15765, SW_ISO_FILTERS, sizeof SW_ISO_FILTERS / sizeof SW_ISO_FILTERS[0]);
+        sw_filter(sc, "ISO15765 FC 7E8 first", ch, FLOW_CONTROL_FILTER, hexmsg(&m, ISO15765, ISO15765_FRAME_PAD, "ffffffff"),
+                  hexmsg(&p, ISO15765, ISO15765_FRAME_PAD, "000007e8"), hexmsg(&f, ISO15765, ISO15765_FRAME_PAD, "000007e0"), 1);
+        sw_filter(sc, "ISO15765 FC 7E8 again (J2534 ERR_NOT_UNIQUE)", ch, FLOW_CONTROL_FILTER, &m, &p, &f, 1);
+        sw_ioctl(sc, "ISO15765 CLEAR_MSG_FILTERS", ch, CLEAR_MSG_FILTERS, NULL, NULL);
+        sw_disconnect(sc, "ISO15765", ch);
+    }
+    if (sw_connect(sc, "ISO14230 Connect", ISO14230, 0, 10400, &ch) == 0) {
+        sw_filter_cases(sc, "ISO14230", ch, ISO14230, SW_KLINE_FILTERS, sizeof SW_KLINE_FILTERS / sizeof SW_KLINE_FILTERS[0]);
+        sw_disconnect(sc, "ISO14230", ch);
+    }
+    sw_close(sc);
+}
+
+typedef struct { const char *name; J_U32 mproto, flags; const char *hex; } sw_wcase;
+
+static const sw_wcase SW_CAN_WRITES[] = {
+    { "11-bit, 8 data bytes", 0, 0, "000007df0201000000000000" },
+    { "id only, DLC 0", 0, 0, "000007df" },
+    { "29-bit with CAN_29BIT_ID", 0, CAN_29BIT_ID, "18db33f10201000000000000" },
+    { "29-bit id without CAN_29BIT_ID", 0, 0, "18db33f10201000000000000" },
+    { "11-bit id with CAN_29BIT_ID", 0, CAN_29BIT_ID, "000007df0201000000000000" },
+    { "ISO15765_FRAME_PAD, 2 data bytes", 0, ISO15765_FRAME_PAD, "000007df0201" },
+    { "SW_CAN_HV_TX", 0, SW_CAN_HV_TX, "000007df0201000000000000" },
+    { "message ProtocolID ISO15765", ISO15765, 0, "000007df0201000000000000" },
+};
+
+static const sw_wcase SW_ISO_WRITES[] = {
+    { "single frame, padded", 0, ISO15765_FRAME_PAD, "000007e03e00" },
+    { "single frame, unpadded", 0, 0, "000007e03e00" },
+    { "to 7E1, no flow-control filter for it", 0, ISO15765_FRAME_PAD, "000007e13e00" },
+    { "19 data bytes, multi-frame", 0, ISO15765_FRAME_PAD, "000007e022f190f18cf187f189f191f192f193f194f1a0" },
+    { "29-bit with CAN_29BIT_ID", 0, CAN_29BIT_ID | ISO15765_FRAME_PAD, "18da10f13e00" },
+    { "extended addressing", 0, ISO15765_ADDR_TYPE | ISO15765_FRAME_PAD, "000006f1123e00" },
+    { "message ProtocolID CAN", CAN, ISO15765_FRAME_PAD, "000007e03e00" },
+};
+
+static const sw_wcase SW_KLINE_WRITES[] = {
+    { "KWP TesterPresent", 0, 0, "8110f13e" },
+    { "WAIT_P3_MIN_ONLY", 0, WAIT_P3_MIN_ONLY, "8110f13e" },
+    { "1 byte", 0, 0, "3e" },
+};
+
+static void sw_write_cases(const char *sc, const char *pn, J_U32 ch, J_U32 proto, const sw_wcase *cs, unsigned n)
+{
+    static PASSTHRU_MSG m;
+    unsigned i; char name[128];
+    for (i = 0; i < n; i++) {
+        snprintf(name, sizeof name, "%s write %s", pn, cs[i].name);
+        sw_write(sc, name, ch, hexmsg(&m, cs[i].mproto ? cs[i].mproto : proto, cs[i].flags, cs[i].hex), 1);
+    }
+}
+
+static void sc_sweep_tx(void)
+{
+    const char *sc = "sweep_tx";
+    static PASSTHRU_MSG m, p, f, batch[3], big;
+    J_U32 ch; unsigned i; char name[96];
+    SCONFIG lb1 = { LOOPBACK, 1 }, lb0 = { LOOPBACK, 0 };
+    if (sw_open(sc) != 0) return;
+
+    if (sw_connect(sc, "CAN Connect", CAN, 0, 500000, &ch) == 0) {
+        sw_write_cases(sc, "CAN", ch, CAN, SW_CAN_WRITES, sizeof SW_CAN_WRITES / sizeof SW_CAN_WRITES[0]);
+        for (i = 0; i < 3; i++) hexmsg(&batch[i], CAN, 0, "000007df0201000000000000");
+        sw_write(sc, "CAN write three messages in one call", ch, batch, 3);
+        sw_filter(sc, "CAN PASS all for the echo", ch, PASS_FILTER, hexmsg(&m, CAN, 0, "00000000"), hexmsg(&p, CAN, 0, "00000000"), NULL, 1);
+        sw_config(sc, "CAN LOOPBACK set 1", ch, SET_CONFIG, &lb1, 1);
+        sleep_ms(50);   /* let answers to the writes above arrive, so the clear takes them */
+        sw_ioctl(sc, "CAN CLEAR_RX_BUFFER before the echo", ch, CLEAR_RX_BUFFER, NULL, NULL);
+        sw_write(sc, "CAN write with LOOPBACK", ch, hexmsg(&m, CAN, 0, "000007df0201000000000000"), 1);
+        mark(); read_some(sc, "CAN ReadMsgs the echo 200ms", ch, 8, 200);
+        sw_config(sc, "CAN LOOPBACK set 0", ch, SET_CONFIG, &lb0, 1);
+        sw_ioctl(sc, "CAN CLEAR_MSG_FILTERS", ch, CLEAR_MSG_FILTERS, NULL, NULL);
+
+        hexmsg(&m, CAN, 0, "000007df0201000000000000");
+        sw_periodic(sc, "CAN periodic every 5 ms", ch, &m, 5, 0);
+        sw_periodic(sc, "CAN periodic every 65535 ms", ch, &m, 65535, 0);
+        sw_periodic(sc, "CAN periodic 29-bit with CAN_29BIT_ID", ch, hexmsg(&p, CAN, CAN_29BIT_ID, "18db33f10201000000000000"), 1000, 0);
+        sw_periodic(sc, "CAN periodic id only", ch, hexmsg(&p, CAN, 0, "000007df"), 1000, 0);
+        for (i = 0; i < 11; i++) {
+            snprintf(name, sizeof name, "CAN periodic %u of 11", i + 1);
+            sw_periodic(sc, name, ch, &m, 1000, 1);
+        }
+        sw_ioctl(sc, "CAN CLEAR_PERIODIC_MSGS with 10 running", ch, CLEAR_PERIODIC_MSGS, NULL, NULL);
+        sw_ioctl(sc, "CAN CLEAR_TX_BUFFER", ch, CLEAR_TX_BUFFER, NULL, NULL);
+        sw_ioctl(sc, "CAN CLEAR_FUNCT_MSG_LOOKUP_TABLE", ch, CLEAR_FUNCT_MSG_LOOKUP_TABLE, NULL, NULL);
+        sw_disconnect(sc, "CAN", ch);
+    }
+
+    if (sw_connect(sc, "ISO15765 Connect", ISO15765, 0, 500000, &ch) == 0) {
+        sw_filter(sc, "ISO15765 FC 7E8/7E0", ch, FLOW_CONTROL_FILTER, hexmsg(&m, ISO15765, ISO15765_FRAME_PAD, "ffffffff"),
+                  hexmsg(&p, ISO15765, ISO15765_FRAME_PAD, "000007e8"), hexmsg(&f, ISO15765, ISO15765_FRAME_PAD, "000007e0"), 1);
+        sw_filter(sc, "ISO15765 FC 29-bit", ch, FLOW_CONTROL_FILTER, hexmsg(&m, ISO15765, CAN_29BIT_ID | ISO15765_FRAME_PAD, "1fffffff"),
+                  hexmsg(&p, ISO15765, CAN_29BIT_ID | ISO15765_FRAME_PAD, "18daf110"), hexmsg(&f, ISO15765, CAN_29BIT_ID | ISO15765_FRAME_PAD, "18da10f1"), 1);
+        sw_filter(sc, "ISO15765 FC extended addressing", ch, FLOW_CONTROL_FILTER,
+                  hexmsg(&m, ISO15765, ISO15765_ADDR_TYPE | ISO15765_FRAME_PAD, "ffffffffff"),
+                  hexmsg(&p, ISO15765, ISO15765_ADDR_TYPE | ISO15765_FRAME_PAD, "00000612f1"),
+                  hexmsg(&f, ISO15765, ISO15765_ADDR_TYPE | ISO15765_FRAME_PAD, "000006f112"), 1);
+        sw_write_cases(sc, "ISO15765", ch, ISO15765, SW_ISO_WRITES, sizeof SW_ISO_WRITES / sizeof SW_ISO_WRITES[0]);
+        /* 4099 bytes is J2534's ceiling for normal addressing: the 4-byte id and 4095 data. */
+        memset(&big, 0, sizeof big);
+        big.ProtocolID = ISO15765; big.TxFlags = ISO15765_FRAME_PAD; big.DataSize = 4099;
+        big.Data[2] = 0x07; big.Data[3] = 0xE0; big.Data[4] = 0x22;
+        sw_write(sc, "ISO15765 write 4099 bytes", ch, &big, 1);
+        sw_periodic(sc, "ISO15765 periodic single frame", ch, hexmsg(&p, ISO15765, ISO15765_FRAME_PAD, "000007e03e80"), 1000, 0);
+        sw_periodic(sc, "ISO15765 periodic multi-frame", ch,
+                    hexmsg(&p, ISO15765, ISO15765_FRAME_PAD, "000007e022f190f18cf187f189f191f192f193f194f1a0"), 1000, 0);
+        sw_disconnect(sc, "ISO15765", ch);
+    }
+
+    if (sw_connect(sc, "ISO14230 Connect", ISO14230, 0, 10400, &ch) == 0) {
+        SBYTE_ARRAY in, outb; unsigned char addr = 0x33, keys[8];
+        sw_write_cases(sc, "ISO14230", ch, ISO14230, SW_KLINE_WRITES, sizeof SW_KLINE_WRITES / sizeof SW_KLINE_WRITES[0]);
+        sw_periodic(sc, "ISO14230 periodic TesterPresent", ch, hexmsg(&p, ISO14230, 0, "8110f13e"), 2000, 0);
+        /* FAST_INIT with a NULL pInput (J2534: the wake-up pattern with no
+         * message) is not swept: the vendor DLL faults writing near address 0
+         * and the process dies (1.02.0.4868, 2026-09-24). */
+        in.NumOfBytes = 0; in.BytePtr = &addr; outb.NumOfBytes = sizeof keys; outb.BytePtr = keys;
+        sw_ioctl(sc, "ISO14230 FIVE_BAUD_INIT zero bytes", ch, FIVE_BAUD_INIT, &in, &outb);
+        in.NumOfBytes = 1;
+        sw_ioctl(sc, "ISO14230 FIVE_BAUD_INIT 0x33", ch, FIVE_BAUD_INIT, &in, &outb);
+        sw_disconnect(sc, "ISO14230", ch);
+    }
+    sw_close(sc);
+}
+
+/* Values J2534 does not allow. This driver refuses them before the wire; the
+ * vendor DLL forwards them, so against a cable they are firmware input never
+ * seen before. Kept out of the sweep so they run only on request and last:
+ * if one wedges the firmware, the tap's final command names it and no reopen
+ * follows (the vendor's reopen of a silent cable sends `tbi`). Rate 0 goes
+ * last, as the likeliest to upset the CAN bit-timing arithmetic. */
+static const sw_wcase SW_CAN_EDGE_WRITES[] = {
+    { "3 bytes", 0, 0, "000007" },
+    { "13 bytes", 0, 0, "000007df020100000000000000" },
+    { "0 bytes", 0, 0, "-" },
+};
+
+static const sw_wcase SW_ISO_EDGE_WRITES[] = {
+    { "ISO15765_ADDR_TYPE, id only", 0, ISO15765_ADDR_TYPE | ISO15765_FRAME_PAD, "000006f1" },
+    { "3 bytes", 0, ISO15765_FRAME_PAD, "000007" },
+};
+
+static void sc_edge(void)
+{
+    const char *sc = "edge";
+    static PASSTHRU_MSG m, p, f, big;
+    J_U32 ch; unsigned i; char name[96], pat[16];
+    if (sw_open(sc) != 0) return;
+
+    if (sw_connect(sc, "CAN Connect", CAN, 0, 500000, &ch) == 0) {
+        sw_filter(sc, "CAN filter type 0", ch, 0, hexmsg(&m, CAN, 0, "00000fff"), hexmsg(&p, CAN, 0, "000007e8"), NULL, 0);
+        sw_filter(sc, "CAN filter type 4", ch, 4, hexmsg(&m, CAN, 0, "00000fff"), hexmsg(&p, CAN, 0, "000007e8"), NULL, 0);
+        /* J2534-1 allows ten filters per channel; whose limit answers the eleventh? */
+        for (i = 0; i < 11; i++) {
+            snprintf(name, sizeof name, "CAN PASS filter %u of 11", i + 1);
+            snprintf(pat, sizeof pat, "000007%02x", 0xE0 + i);
+            sw_filter(sc, name, ch, PASS_FILTER, hexmsg(&m, CAN, 0, "00000fff"), hexmsg(&p, CAN, 0, pat), NULL, 1);
+        }
+        sw_ioctl(sc, "CAN CLEAR_MSG_FILTERS with 11 set", ch, CLEAR_MSG_FILTERS, NULL, NULL);
+        sw_write_cases(sc, "CAN", ch, CAN, SW_CAN_EDGE_WRITES, sizeof SW_CAN_EDGE_WRITES / sizeof SW_CAN_EDGE_WRITES[0]);
+        hexmsg(&m, CAN, 0, "000007df0201000000000000");
+        sw_periodic(sc, "CAN periodic every 4 ms", ch, &m, 4, 0);
+        sw_periodic(sc, "CAN periodic every 65536 ms", ch, &m, 65536, 0);
+        sw_periodic(sc, "CAN periodic 3 bytes", ch, hexmsg(&p, CAN, 0, "000007"), 1000, 0);
+        sw_disconnect(sc, "CAN", ch);
+    }
+
+    if (sw_connect(sc, "ISO15765 Connect", ISO15765, 0, 500000, &ch) == 0) {
+        sw_filter(sc, "ISO15765 FC 7E8/7E0", ch, FLOW_CONTROL_FILTER, hexmsg(&m, ISO15765, ISO15765_FRAME_PAD, "ffffffff"),
+                  hexmsg(&p, ISO15765, ISO15765_FRAME_PAD, "000007e8"), hexmsg(&f, ISO15765, ISO15765_FRAME_PAD, "000007e0"), 1);
+        sw_write_cases(sc, "ISO15765", ch, ISO15765, SW_ISO_EDGE_WRITES, sizeof SW_ISO_EDGE_WRITES / sizeof SW_ISO_EDGE_WRITES[0]);
+        memset(&big, 0, sizeof big);
+        big.ProtocolID = ISO15765; big.TxFlags = ISO15765_FRAME_PAD; big.DataSize = 4100;
+        big.Data[2] = 0x07; big.Data[3] = 0xE0; big.Data[4] = 0x22;
+        sw_write(sc, "ISO15765 write 4100 bytes", ch, &big, 1);
+        sw_disconnect(sc, "ISO15765", ch);
+    }
+
+    if (sw_connect(sc, "ISO14230 Connect", ISO14230, 0, 10400, &ch) == 0) {
+        memset(&big, 0, sizeof big);
+        big.ProtocolID = ISO14230; big.DataSize = 260; big.Data[0] = 0x80; big.Data[1] = 0x10; big.Data[2] = 0xF1; big.Data[3] = 0x3E;
+        sw_write(sc, "ISO14230 write 260 bytes", ch, &big, 1);
+        sw_disconnect(sc, "ISO14230", ch);
+    }
+
+    if (sw_connect(sc, "CAN rate 0", CAN, 0, 0, &ch) == 0)
+        sw_disconnect(sc, "CAN rate 0", ch);
+    sw_close(sc);
+}
+
 /* ---- main -------------------------------------------------------------- */
 #define BIND(field, name) do { *(void **)(&api.field) = sym(name); if (!api.field) { fprintf(stderr, "missing export %s\n", name); return 2; } } while (0)
 
@@ -605,7 +1093,16 @@ static const struct { const char *name; void (*fn)(void); int by_default; } SCEN
     { "open", sc_open, 1 }, { "iso15765", sc_iso15765, 1 }, { "multiframe", sc_multiframe, 1 },
     { "timeouts", sc_timeouts, 1 }, { "errors", sc_errors, 1 }, { "periodic", sc_periodic, 1 },
     { "raw_can", sc_raw_can, 1 }, { "kline", sc_kline, 0 }, { "bench", sc_bench, 0 },
+    { "sweep_connect", sc_sweep_connect, 0 }, { "sweep_config", sc_sweep_config, 0 },
+    { "sweep_filter", sc_sweep_filter, 0 }, { "sweep_tx", sc_sweep_tx, 0 }, { "edge", sc_edge, 0 },
 };
+
+/* "sweep" selects every sweep_* scenario. */
+static int selects(const char *sel, const char *name)
+{
+    size_t n = strlen(sel);
+    return !strcmp(sel, "all") || !strcmp(sel, name) || (!strncmp(sel, name, n) && name[n] == '_');
+}
 
 int main(int argc, char **argv)
 {
@@ -656,7 +1153,7 @@ int main(int argc, char **argv)
     for (r = 0; r < repeat; r++) {
         for (i = 0; i < (int)(sizeof SCENARIOS / sizeof SCENARIOS[0]); i++) {
             int run = nsel == 0 ? SCENARIOS[i].by_default : 0, k;
-            for (k = 0; k < nsel; k++) if (!strcmp(sel[k], SCENARIOS[i].name) || !strcmp(sel[k], "all")) run = 1;
+            for (k = 0; k < nsel; k++) if (selects(sel[k], SCENARIOS[i].name)) run = 1;
             if (!run) continue;
             fprintf(out, "{\"begin\":\"%s\",\"round\":%d}\n", SCENARIOS[i].name, r);
             SCENARIOS[i].fn();

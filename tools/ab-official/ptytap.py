@@ -15,13 +15,18 @@ except termios.error: pass
 open(a.pty_file, "w").write(os.ttyname(slave) + "\n")
 log = open(a.log, "w", buffering=1); t0 = time.monotonic()
 def emit(d, b): log.write("%9.4f %s %s |%s|\n" % (time.monotonic() - t0, d, b.hex(" "), "".join(chr(c) if 32 <= c < 127 else "." for c in b)))
+# A pty holds only a few KB: a 4 KB transmit fills the far side's buffer before
+# it drains, so bytes are queued per direction and written as each fd accepts
+# them, never dropped and never blocking the other direction.
+os.set_blocking(master, False)
+pend = {tfd: b"", master: b""}
 while True:
-    r, _, _ = select.select([master, tfd], [], [])
-    if master in r:
-        try: b = os.read(master, 4096)
-        except OSError: b = b""
-        if b: emit("H>D", b); os.write(tfd, b)
-    if tfd in r:
-        try: b = os.read(tfd, 4096)
-        except OSError: b = b""
-        if b: emit("D>H", b); os.write(master, b)
+    r, w, _ = select.select([master, tfd], [fd for fd in pend if pend[fd]], [])
+    for src, dst, d in ((master, tfd, "H>D"), (tfd, master, "D>H")):
+        if src in r:
+            try: b = os.read(src, 4096)
+            except OSError: b = b""
+            if b: emit(d, b); pend[dst] += b
+    for fd in w:
+        try: pend[fd] = pend[fd][os.write(fd, pend[fd]):]
+        except BlockingIOError: pass

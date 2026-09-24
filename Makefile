@@ -141,6 +141,8 @@ differential: diff-tools $(SHLIB)
 #   make ab-official                       # both drivers against the simulator
 #   make ab-official-cable CABLE=/dev/cu.usbmodemXXXX
 #   make ab-official AB_ARGS="-- open bench --cycles 50"
+#   make ab-official AB_ARGS="-- sweep"    # every parameter once, wire compared per step
+#   make ab-official AB_ARGS="-- edge"     # values J2534 forbids; on a cable run it alone, last
 AB_ARGS ?=
 ab-official-image:
 	docker build --label "ab.context=$$(cat tools/ab-official/Dockerfile tools/ab-official/iface.reg | shasum -a 256 | cut -c1-16)" -t openport-ab-official tools/ab-official
