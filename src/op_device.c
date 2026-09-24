@@ -141,14 +141,14 @@ static void queue_push(op_channel *c, const PASSTHRU_MSG *m)
  * Queue one frame as its own message. Indications (J2534-1 section 8.6) report
  * ExtraDataIndex zero; a whole message reports ExtraDataIndex = DataSize.
  */
-static void indicate(op_device *d, op_channel *c, const op_reply *r, J_U32 status,
-                     int is_indication, int keep_data)
+static void queue_frame(op_device *d, op_channel *c, J_U32 protocol, const op_reply *r,
+                        J_U32 status, int is_indication, int keep_data)
 {
     PASSTHRU_MSG ind;
     size_t take = keep_data ? r->data_len : 0;
 
     memset(&ind, 0, sizeof ind);
-    ind.ProtocolID = c->protocol;
+    ind.ProtocolID = protocol;
     ind.Timestamp = r->timestamp_us;
     ind.RxStatus = status;
     if (take > sizeof ind.Data) take = sizeof ind.Data;
@@ -157,6 +157,12 @@ static void indicate(op_device *d, op_channel *c, const op_reply *r, J_U32 statu
     ind.ExtraDataIndex = is_indication ? 0 : ind.DataSize;
     queue_push(c, &ind);
     pthread_cond_broadcast(&d->rx_cv);
+}
+
+static void indicate(op_device *d, op_channel *c, const op_reply *r, J_U32 status,
+                     int is_indication, int keep_data)
+{
+    queue_frame(d, c, c->protocol, r, status, is_indication, keep_data);
 }
 
 /*
@@ -176,7 +182,18 @@ static void absorb_frame(op_device *d, const op_reply *r)
 
     if (r->channel >= OP_MAX_CHANNELS) return;
     c = &d->ch[r->channel];
-    if (!c->open) return;
+    if (!c->open) {
+        /* With LOOPBACK on an ISO15765 channel the firmware reports the echoes
+         * on raw CAN channel 5: the frames the cable put on the bus, a
+         * single-frame request as four zero bytes (bench ECU, 2026-09-24).
+         * Tactrix's DLL delivers them to the ISO15765 channel as reported,
+         * ProtocolID CAN. While channel 5 is open they are delivered there. */
+        int can = op_protocol_channel(CAN), iso = op_protocol_channel(ISO15765);
+        if ((int)r->channel == can && (r->status & OP_STS_LOOPBACK) && d->ch[iso].open)
+            queue_frame(d, &d->ch[iso], CAN, r,
+                        TX_MSG_TYPE | ((r->status & OP_STS_29BIT) ? CAN_29BIT_ID : 0), 0, 1);
+        return;
+    }
 
     base = op_protocol_base(c->protocol);
     loopback = (r->status & OP_STS_LOOPBACK) != 0;

@@ -594,6 +594,38 @@ static void read_version(void)
  * read would leave a caller unable to tell a finished exchange from an ECU
  * that went quiet.
  */
+/* With LOOPBACK on an ISO15765 channel the firmware reports the echoes on raw
+ * CAN channel 5; here the echo of the flow-control frame the cable sent (bench
+ * ECU, 2026-09-24). Tactrix's DLL delivers them to the ISO15765 channel as the
+ * firmware reported them; an open CAN channel keeps them. */
+static void iso15765_loopback_echo(void)
+{
+    J_U32 dev = open_device(), iso = 0, can = 0, count;
+    PASSTHRU_MSG got[4];
+    const uint8_t echo[] = { 'a','r','5', 0x11, 0x20, 0,0,0x40,0x00,
+                             0x00,0x00,0x07,0xB5, 0x30,0,0,0,0,0,0,0 };
+
+    PassThruConnect(dev, ISO15765, 0, 500000, &iso);
+    mock_push(echo, sizeof echo);
+    count = 4;
+    CHECK_EQ(PassThruReadMsgs(iso, got, &count, 300), ERR_TIMEOUT, "echo read on the ISO15765 channel");
+    CHECK_EQ(count, 1, "one echo");
+    CHECK_EQ(got[0].ProtocolID, CAN, "ProtocolID CAN, as the vendor DLL delivers it");
+    CHECK_EQ(got[0].RxStatus, TX_MSG_TYPE, "marked as transmitted");
+    CHECK_EQ(got[0].DataSize, 12, "the whole frame");
+    CHECK_EQ(got[0].Data[4], 0x30, "flow-control frame intact");
+    CHECK_EQ(got[0].Timestamp, 0x4000, "timestamp preserved");
+
+    PassThruConnect(dev, CAN, 0, 500000, &can);
+    mock_push(echo, sizeof echo);
+    count = 4;
+    CHECK_EQ(PassThruReadMsgs(can, got, &count, 300), ERR_TIMEOUT, "with a CAN channel open");
+    CHECK_EQ(count, 1, "the echo is delivered there");
+    count = 4;
+    CHECK_EQ(PassThruReadMsgs(iso, got, &count, 0), ERR_BUFFER_EMPTY, "and not on the ISO15765 channel");
+    shut(dev);
+}
+
 static void receive_path(void)
 {
     J_U32 dev = open_device(), ch = 0, count;
@@ -1188,6 +1220,7 @@ void test_j2534(void)
     read_version();
     last_error_is_useful();
     receive_path();
+    iso15765_loopback_echo();
     filter_takes_flow_control_flags();
     kline_init_ioctls();
     kline_init_failure();

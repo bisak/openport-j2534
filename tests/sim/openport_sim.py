@@ -170,7 +170,8 @@ class Wire:
         #               frames carry the 4-byte timestamp and nothing else
         #   uniform     every frame carries the timestamp, as on CAN
         self.kline_layout = "asymmetric"
-        # Shape of a transmit echo when LOOPBACK=1:
+        # Shape of a K-line transmit echo when LOOPBACK=1 (CAN and ISO15765
+        # are measured, see OpenPortSim._loopback_echo):
         #   mirror_rx  the receive framing with 0x20 set on every frame
         #   data_only  a single 0x60 frame with id+data, never an announcement
         #   combined   a single 0xE0 frame with id+data
@@ -371,6 +372,18 @@ class OpenPortSim:
         for chunk in _split(data, MAX_FRAME_PAYLOAD if uniform else 254):
             self._raw_frame(ch, lb, (ts + chunk) if uniform else chunk)
         self._raw_frame(ch, STS_END | lb, ts)
+
+    def _loopback_echo(self, ch, payload):
+        """LOOPBACK's echo of one transmit. CAN and ISO15765 alike: a 0x20 frame
+        of four zero bytes on raw CAN channel 5 (PROTOCOL.md section 7.7;
+        measured on raw CAN 2026-09-16, on ISO15765 against the bench ECU
+        2026-09-24, where the flow-control frames the cable sent were echoed
+        too, id and data intact; this simulator sends none). K-line is
+        unmeasured and follows `Wire.echo_shape`."""
+        if ch in (5, 6):
+            self._raw_frame(5, STS_LOOPBACK, struct.pack(">I", self._ts()) + b"\0\0\0\0")
+        else:
+            self.send_message(ch, payload, loopback=True)
 
     def _tx_indication(self, ch, payload):
         if ch in KLINE_PROTOCOLS:
@@ -617,7 +630,7 @@ class OpenPortSim:
 
         # Loopback echo of what we transmitted, then the ECU's answer.
         if c.config.get(3):                       # LOOPBACK enabled
-            self.send_message(ch, payload, loopback=True)
+            self._loopback_echo(ch, payload)
         self._ok()
         if self.wire.tx_done:
             self._tx_indication(ch, payload)
@@ -775,7 +788,7 @@ class OpenPortSim:
             self.tx_count += 1
             self.tx_times.append(time.monotonic())
             if c.config.get(3):                       # LOOPBACK enabled
-                self.send_message(ch, payload, loopback=True)
+                self._loopback_echo(ch, payload)
             resp = self._ecu_response(ch, payload)
             if resp is not None:
                 self.send_message(ch, resp)
