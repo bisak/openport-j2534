@@ -302,7 +302,9 @@ can be opened again. Tactrix's DLL maps the J2534 ids onto these channels:
   `ISO9141_K_LINE_ONLY` (`ato3 4096 …`) and 9.
 - **The baud rate is not checked.** `ato5 0 123456 0`, `ato3 0 4800 0`,
   `ato4 0 9600 0` and `ato6 0 0 0` all answer `aro`; `ERR_INVALID_BAUDRATE` never
-  appeared. What a wrong rate does on the bus is not measured.
+  appeared. What a wrong rate does on the bus is not measured, except that
+  `ato3 512 5 0` reads back `DATA_RATE` 10400 and sends at that rate: a
+  five-baud address cannot be sent as data (2026-09-24).
 
 **The cable does ISO-TP.** The host sends a whole service request and receives a
 whole reply; the cable sends first and consecutive frames, answers with
@@ -510,7 +512,7 @@ frame; `caddy_raw_can_replay` in `tests/unit/test_golden.c` guards against that.
 Compared with Tactrix's DLL, the delivered messages are identical: `RxStatus` 0,
 `DataSize` 8, `ExtraDataIndex` 8, CAN id first.
 
-### 7.9 The K-line frame layout **[P]**: from other implementations, not measured here
+### 7.9 The K-line frame layout **[P]**: echoes measured, received frames not
 
 On channels 3 and 4 (and probably 7–9) frames are not laid out like CAN frames:
 
@@ -534,10 +536,39 @@ One of them has a test fixture with an END frame that has no body at all; the
 parser accepts both. Treating K-line like CAN would eat the first four bytes of
 every K-line message.
 
-Whether the checksum byte is delivered, and how a checksum error is marked, is
-not measured. Tactrix's changelog for firmware 1.41 says K-line echoes follow
-`LOOPBACK` ("you will no longer get echoes of your commands unless
-LOOPBACK=1").
+The echo rows are measured (bench, nothing on pin 7, 2026-09-24). A transmit
+with `LOOPBACK` on, no init first:
+
+```
+ato3 4608 10400 0 / ats3 3 1 / atf3 1 0 1 + 00 00
+att3 5 0 1000000 + 68 6a f1 01 00
+  ar3 05 a0 22 a6 cb 63            loopback start, timestamp
+  ar3 06 20 68 6a f1 01 00         loopback data, no timestamp
+  ar3 05 60 22 a7 28 b2            loopback end, timestamp 24 ms later
+  aro
+```
+
+- `aro` arrives before or after the echo; both orders were seen.
+- No transmit indication (`0x10`) follows a K-line transmit, with or without
+  `LOOPBACK`, and with `LOOPBACK` off nothing is echoed.
+- The echo passes through the transceiver, which reads pin 7, so it doubles as
+  a check that the line is not held low (`car_capture.py`'s K-line echo check).
+- ISO 14230 without `ISO9141_NO_CHECKSUM` appends the checksum on the wire: the
+  same four bytes take 6 ms longer (one byte and one `P4_MIN` gap), and a fast
+  init's reply comes 6 ms later. The echo carries the message without it.
+- An `aty` fast init produces no echo of its StartCommunication bytes.
+- The firmware's fast init waits about 50 ms for the answer (126 ms in all
+  for a four-byte request). `aty4 0 0` makes the wake-up pulse alone and answers
+  `are 7` after 52 ms; a raw `att4` can follow at once on the same channel, which
+  is a fast init with as long a wait as the caller wants.
+- A fast init appears to wait for 300 ms of quiet on the line first (ISO
+  14230's W5, default 300 ms): `aty` sent about 250 ms after a transmit
+  answered after 86–95 ms instead of 52 (the Audi, 2026-09-24).
+
+Frames received from an ECU are still unmeasured: how the checksum byte is
+delivered and how a checksum error is marked. Tactrix's changelog for firmware
+1.41 says K-line echoes follow `LOOPBACK` ("you will no longer get echoes of
+your commands unless LOOPBACK=1").
 
 `tools/car/car_capture.py --kline` records every K-line frame's raw body, and
 `analyse_capture.py` tests both layouts against the recording: in this one the
@@ -562,6 +593,7 @@ tried with both:
 - Anything else answers `are 1` (`ERR_NOT_SUPPORTED`). The driver passes every
   parameter on and returns the cable's answer.
 - `W1` raised to 1000 ms is honoured: `atw` then takes 3,501 ms instead of 2,451.
+- `FIVE_BAUD_MOD` 0–3 are all accepted and read back (2026-09-24).
 - Tactrix's own `TX_PARAM_STOP_BITS` (0x9000) exists: `atg9 36864` reads 1 on the
   jack channel, `atg3 36864` on ISO 9141, and `ats9 36864 2` is accepted and
   reads back 2 (through the DLL, 2026-09-16).
@@ -783,11 +815,15 @@ On a 2009 Audi 1.9 TDI, on 2026-09-13:
   (0x01) opened, and five identification records were read through it, the
   flash-status record `1A 9C` among them.
 - The K-line answered no five-baud or fast init at any of eight VAG addresses,
-  through this driver or Tactrix's DLL, though the line is electrically present
-  (a fast init takes 126–132 ms on the car against 78 ms on the bench). Either
-  OBD pin 7 is not on a live K-line on this car, or the cable's five-baud
-  waveform is not what this ECU accepts ([AB-OFFICIAL.md](AB-OFFICIAL.md)). It
-  is not the driver: Tactrix's DLL failed identically.
+  through this driver or Tactrix's DLL. Every init timed out exactly as on an
+  empty connector; an earlier reading of the fast-init timing as proof of a
+  live line did not reproduce. Audi's wiring diagrams run the engine ECU's
+  K-line to OBD pin 7, a K-line-only tool has flashed it there, and the cable's
+  own K-line works (§7.9). A second visit sent the open-source EDC16 tool's
+  exact fast init by hand, with a second's listening, several hundred times
+  and across two ignition cycles, and got no answer either
+  ([AB-OFFICIAL.md](AB-OFFICIAL.md)). It is not the driver: Tactrix's DLL
+  failed identically.
 
 ---
 

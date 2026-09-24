@@ -300,22 +300,49 @@ status bits and sizes, and TxDone indications of the same shape.
 
 **K-line.** Both drivers failed every init identically, also after re-seating
 the OBD plug: fast init to 0x33 and 0x01, and five-baud to 0x33, 0x01, 0x10,
-0x17, 0x19, 0x25, 0x08 and 0x46, all `ERR_FAILED`. The line is electrically
-present: a fast init takes 126–132 ms on the car for either driver (wake-up
-pulse, request, wait) against 78 ms on the bench with nothing on pin 7.
+0x17, 0x19, 0x25, 0x08 and 0x46, all `ERR_FAILED`.
 
-The open-source EDC16 K-line flasher `fjvva/ecu-tool` does a five-baud init to
-0x01, the keyword handshake, then StartCommunication `81 10 F1 81` to 0x10
-expecting `83 F1 10 C1 EF 8F`, retrying the five-baud init up to six times
-because the ECU often ignores the first. Replicating that from the cable (eight
-five-baud attempts at 0x01 on both K-line channels, W1 raised to 1000 ms, 9600
-and 10400 baud, six fast inits to 0x10) produced no sync byte.
+This page used to say the line was electrically present, because a fast init
+took 126–132 ms on the car against 78 ms on the bench. The 78 ms has no
+recorded source and does not reproduce: on 2026-09-24, with 11.9 V on pin 16
+and nothing on pin 7, the bench took 126 ms for the fast init and 2,451 ms for
+the five-baud init, the car's figures exactly. Every init on the car ran as on
+an empty connector: nothing came back on pin 7.
 
-So either OBD pin 7 on this car is not on a live K-line (the owner's Galletto
-may have been used at the ECU connector or in boot mode), or the cable's
-five-baud waveform is not what this ECU accepts. A multimeter on pin 7 (12 V at
-idle means a pulled-up K-line) and a bit-banged init from an FTDI cable would
-tell the two apart. The driver is not the cause: Tactrix's failed identically.
+The open-source EDC16 K-line flasher `fjvva/ecu-tool`, written for EDC16U31/34,
+reads with a fast init sending `81 10 F1 81 03` to 0x10 (up to 20 tries) and
+writes after a five-baud init to 0x01, the keyword handshake, then
+StartCommunication `81 10 F1 81` expecting `83 F1 10 C1 EF 8F`. From the cable
+this was replicated: eight five-baud attempts at 0x01 on both K-line channels,
+W1 raised to 1000 ms, 9600 and 10400 baud, six fast inits to 0x10. No sync byte
+came back. The cable appends the checksum, so the fast init sent the same five
+bytes (PROTOCOL.md §7.9).
+
+Audi's wiring diagrams run the engine ECU's K-line (T94/72) through splice B444
+to OBD pin 7: the A3 8P 1.9 TDI BLS engine sheet (2006) and the A3 diagnostic
+connector sheet No. 152/3 (edition 09/2009), and the owner has flashed this
+ECU through the OBD port with a Galletto 1260, which has only K-line. The
+cable's own K-line works: a raw frame with `LOOPBACK` comes back intact
+through the transceiver. The driver is not the cause: Tactrix's failed
+identically.
+
+A second visit (2026-09-24, 12.0 V on pin 16) tried what was left on the
+cable's side. The echo came back intact at the car too, 24 ms for five bytes,
+as on the bench, so the line was not held low. Nothing answered:
+
+- the six firmware wake-ups of `car_capture.py --kline`;
+- a fast init by hand (the wake-up pulse alone, then StartCommunication as a
+  raw transmit, then a second's listening; PROTOCOL.md §7.9), 20 tries each to
+  0x10 and 0x01 on ISO 14230, and 10 each on ISO 9141 raw, where the echo
+  showed `81 10 F1 81 03` on the wire, the open-source tool's bytes;
+- 394 such fast inits in 150 s, with about 250 ms of listening each, while
+  the ignition was switched off and on twice.
+
+The firmware's own fast init waits only about 50 ms for an answer, where the
+open-source tool waits 200 ms, but the second's listening rules that out.
+Whether anything answers on pin 7 today, and what the owner's Galletto sends
+when it does, is what remains: its identification run, recorded through an
+OBD Y-splitter with `car_capture.py --kline-listen`.
 
 ## Replaying an application through both drivers
 

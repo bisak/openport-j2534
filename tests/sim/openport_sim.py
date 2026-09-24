@@ -169,8 +169,8 @@ class Wire:
         #               frames carry the 4-byte timestamp and nothing else
         #   uniform     every frame carries the timestamp, as on CAN
         self.kline_layout = "asymmetric"
-        # Shape of a K-line transmit echo when LOOPBACK=1 (CAN and ISO15765
-        # are measured, see OpenPortSim._loopback_echo):
+        # Shape of a K-line transmit echo when LOOPBACK=1; mirror_rx measured
+        # on the bench, 2026-09-24 (CAN and ISO15765: OpenPortSim._loopback_echo):
         #   mirror_rx  the receive framing with 0x20 set on every frame
         #   data_only  a single 0x60 frame with id+data, never an announcement
         #   combined   a single 0xE0 frame with id+data
@@ -365,9 +365,10 @@ class OpenPortSim:
             announcement.
 
         Measured since (PROTOCOL.md 7.6, 7.7): long CAN/ISO15765 payloads come in
-        70-byte chunks, and the echo is `_loopback_echo`. MODELLED, because no
-        capture shows it: the K-line layout (`Wire.kline_layout`), which follows
-        three independent drivers.
+        70-byte chunks, and the echo is `_loopback_echo`. MODELLED for frames
+        received from an ECU, because no capture shows one: the K-line layout
+        (`Wire.kline_layout`), which follows three independent drivers and
+        matches the cable's own K-line echoes (PROTOCOL.md 7.9).
         """
         lb = STS_LOOPBACK if loopback else 0
         payload = bytes(payload)
@@ -393,8 +394,9 @@ class OpenPortSim:
         of four zero bytes on raw CAN channel 5 (PROTOCOL.md section 7.7;
         measured on raw CAN 2026-09-16, on ISO15765 against the bench ECU
         2026-09-24, where the flow-control frames the cable sent were echoed
-        too, id and data intact; this simulator sends none). K-line is
-        unmeasured and follows `Wire.echo_shape`."""
+        too, id and data intact; this simulator sends none). K-line follows
+        `Wire.echo_shape`, whose default mirror_rx is what the cable sent on
+        the bench (2026-09-24, PROTOCOL.md 7.9)."""
         if ch in (5, 6):
             self._raw_frame(5, STS_LOOPBACK, struct.pack(">I", self._ts()) + b"\0\0\0\0")
         else:

@@ -267,6 +267,21 @@ class Port:
                 emit(hexdump(r))
         return r
 
+    def cmd_line(self, line, wait=1.0):
+        """cmd() that returns at the first complete reply line instead of
+        waiting for the port to go quiet, for steps that must follow at once."""
+        termios.tcflush(self.fd, termios.TCIFLUSH)
+        t0 = time.time()
+        os.write(self.fd, line)
+        buf = b""
+        while time.time() - t0 < wait and b"\r\n" not in buf:
+            rd, _, _ = select.select([self.fd], [], [], 0.001)
+            if rd:
+                buf += os.read(self.fd, 4096)
+        d = line.decode("ascii", "replace").replace("\r", "\\r").replace("\n", "\\n")
+        emit(f"  RAW cmd={d} payload= first={(time.time()-t0)*1000:.0f}ms reply={buf.hex()}")
+        return buf
+
     def drain_timed(self, sec, idle=0.25):
         """drain() that also reports when the first byte arrived."""
         buf, t_first = b"", None
@@ -464,27 +479,61 @@ def q1_received_frames(p, tx, rx):
 # PROTOCOL.md section 3). Either can be `are <code>` instead.
 #
 # Every variant is a standard tester wake-up. Two use the EOBD functional
-# address 0x33 (what any scan tool does); two use the VAG engine address 0x01
-# (what VCDS does), because a 2009 VAG diesel may answer only its own address.
-# StartCommunication ($81) is on the read-only whitelist.
+# address 0x33 (what any scan tool does); the VAG ones use the engine address
+# 0x01 (what VCDS does), because a 2009 VAG diesel may answer only its own
+# address. StartCommunication ($81) is on the read-only whitelist.
+#
+# An optional sixth field lists configuration values set after `ato`.
+# FIVE_BAUD_MOD (33) = 3 is ISO 9141 as defined in ISO 9141: the key bytes are
+# the whole answer, with no inverted-byte exchange to fail, so an ECU that
+# sends sync and key bytes but then stalls still shows them. The firmware
+# accepts and reads back 0-3 (bench, 2026-09-24).
 KLINE_INITS = [
     ("five33", 3, "ISO9141-2 five-baud, address 0x33 (EOBD)",          b"atw3 51\r\n", b""),
     ("fast33", 4, "ISO14230-4 fast init, C1 33 F1 81 (EOBD)",          b"aty4 4 0\r\n", b"\xc1\x33\xf1\x81"),
     ("five01", 4, "ISO14230 five-baud, address 0x01 (VAG engine)",     b"atw4 1\r\n", b""),
     ("fast01", 4, "ISO14230 fast init, 81 01 F1 81 (VAG engine)",      b"aty4 4 0\r\n", b"\x81\x01\xf1\x81"),
     ("five10", 4, "ISO14230 five-baud, address 0x10 (Bosch default)",  b"atw4 16\r\n", b""),
+    ("five01m3", 4, "ISO14230 five-baud, address 0x01, FIVE_BAUD_MOD 3 (key bytes only)",
+     b"atw4 1\r\n", b"", ((33, 3),)),
 ]
 
+# The EDC16's own KWP2000 address. An open-source EDC16 flasher
+# (fjvva/ecu-tool) wakes the ECU at 0x01, then sends StartCommunication to
+# 0x10 and expects 83 F1 10 C1 EF 8F back.
+EDC16_KWP_ADDR = 0x10
 
-def kline_header(proto, physical, n):
+# Fast init by hand (kline_manual_fast), for an ECU slower to answer than the
+# firmware waits: the StartCommunication target of each.
+KLINE_MANUAL = [
+    ("manual10", EDC16_KWP_ADDR),
+    ("manual01", 0x01),
+]
+KLINE_RAW = [
+    ("raw10", EDC16_KWP_ADDR),
+    ("raw01", 0x01),
+]
+
+ISO9141_NO_CHECKSUM = 0x200
+ISO9141_K_LINE_ONLY = 0x1000
+
+
+def kline_vag(name):
+    return name.startswith(("five01", "fast01"))
+
+
+def kline_header(proto, physical, n, target=None):
     """Addressing header for an n-byte request. ISO9141-2: 68 6A F1.
     ISO14230: format byte with the length in its low six bits, then target and
-    source. Functional target 0x33; physical target 0x01 (VAG engine ECU)."""
+    source. Functional target 0x33; physical target 0x01 (VAG engine ECU)
+    unless another is given."""
     if proto == 3:
         return b"\x68\x6a\xf1"
     if n > 63:
         raise Unsafe("K-line request longer than 63 bytes")
-    return bytes([(0x80 if physical else 0xC0) | n, 0x01 if physical else 0x33, 0xF1])
+    if target is None:
+        target = 0x01 if physical else 0x33
+    return bytes([(0x80 if physical else 0xC0) | n, target, 0xF1])
 
 
 def parse_init_reply(r):
@@ -518,13 +567,15 @@ def parse_init_reply(r):
 
 def kline_init(p, variant):
     """Open the channel, arm a pass-all filter, run one init. Returns (proto, ok)."""
-    name, proto, label, line, payload = variant
+    name, proto, label, line, payload, *rest = variant
     emit(f"\n  -- {name}: {label} (protocol {proto} @ 10400) --")
     p.resync()
     r = p.cmd(f"ato{proto} 0 10400 0\r\n".encode(), wait=1.0, show=False)
     if not r.startswith(b"aro"):
         emit(f"      channel open failed: {r!r}")
         return proto, False
+    for param, value in (rest[0] if rest else ()):
+        p.cmd(f"ats{proto} {param} {value}\r\n".encode(), wait=1.0, show=False)
     # A pass-all filter: without one the firmware is reported to drop every
     # received K-line byte.
     p.cmd(f"atf{proto} 1 0 1\r\n".encode(), b"\x00\x00", 1.0, show=False)
@@ -537,11 +588,11 @@ def kline_init(p, variant):
     return proto, kind in ("ary", "arw", "aro")
 
 
-def kline_requests(p, proto, physical, requests):
+def kline_requests(p, proto, physical, requests, target=None):
     for name, svc in requests:
         emit(f"      [{name}]")
         try:
-            hdr = kline_header(proto, physical, len(svc))
+            hdr = kline_header(proto, physical, len(svc), target)
             show_stream(p.transmit_kline(proto, hdr, svc, wait=4.0))
         except Unsafe as e:
             emit(f"      !! REFUSED: {e}")
@@ -549,6 +600,129 @@ def kline_requests(p, proto, physical, requests):
         if extra:
             emit("      [later frames]")
             show_stream(extra)
+
+
+def kline_echo(p):
+    """
+    Before any wake-up: does the cable's own K-line work on this connector?
+    A raw frame sent with LOOPBACK comes back through the transceiver, which
+    reads pin 7. On the bench, with nothing on pin 7, it returns intact as
+    START (timestamp), data, END (timestamp), 24 ms for five bytes
+    (2026-09-24). A pin 7 held low or overloaded by the vehicle loses or
+    corrupts it, and every wake-up then times out exactly as on an empty
+    connector. The frame is an OBD mode 01 request, on the whitelist.
+    """
+    emit("\n  -- K-line echo: raw 68 6A F1 01 00 with LOOPBACK, no wake-up --")
+    p.resync()
+    p.cmd(f"ato3 {ISO9141_NO_CHECKSUM | ISO9141_K_LINE_ONLY} 10400 0\r\n".encode(),
+          wait=1.0, show=False)
+    p.cmd(b"ats3 3 1\r\n", wait=1.0, show=False)
+    p.cmd(b"atf3 1 0 1\r\n", b"\x00\x00", 1.0, show=False)
+    sent = b"\x68\x6a\xf1\x01\x00"
+    r = p.transmit_kline(3, sent[:3], sent[3:], wait=1.5) + p.drain(0.5)
+    show_stream(r)
+    echo = b"".join(f[6] for f in parse_frames(r)
+                    if f[0] == "FRAME" and f[3] & 0x20 and not f[3] & 0xD0)
+    if echo == sent:
+        emit("      ECHO INTACT: the cable drives and reads pin 7, and the line is not held low")
+    elif not echo:
+        emit("      NO ECHO: pin 7 may be shorted or held low; every wake-up below will time out")
+    else:
+        emit(f"      ECHO CORRUPTED: read back {echo.hex(' ')}: pin 7 is loaded or shorted")
+    p.cmd(b"atc3\r\n", wait=0.5, show=False)
+
+
+def kline_manual_fast(p, name, target, reads, tries=20):
+    """
+    Fast init by hand. The firmware's own fast init gives up about 50 ms after
+    the request (126 ms in all for a four-byte request, bench 2026-09-24);
+    fjvva/ecu-tool, written for EDC16U31/34, waits 200 ms for the answer and
+    tries up to 20 times. Here `aty` with no message makes the wake-up pulse
+    alone (52 ms), StartCommunication follows as a raw transmit with the
+    checksum appended by the firmware, and the port is read for a second.
+    """
+    emit(f"\n  -- {name}: fast init by hand, 81 {target:02X} F1 81, "
+         f"1 s listen, up to {tries} tries --")
+    p.resync()
+    p.cmd(b"ato4 0 10400 0\r\n", wait=1.0, show=False)
+    p.cmd(b"atf4 1 0 1\r\n", b"\x00\x00", 1.0, show=False)
+    answered = False
+    for i in range(tries):
+        p.cmd_line(b"aty4 0 0\r\n", wait=0.5)
+        r = p.transmit_kline(4, bytes([0x81, target, 0xF1]), b"\x81", wait=1.0)
+        r += p.drain(1.0, idle=1.0)
+        rx = [f for f in parse_frames(r) if f[0] == "FRAME" and not f[3] & 0x20]
+        if rx:
+            emit(f"      try {i + 1}: ANSWERED")
+            show_stream(r)
+            answered = True
+            break
+        emit(f"      try {i + 1}: nothing received")
+    if answered:
+        kline_requests(p, 4, True, reads, target)
+    p.cmd(b"atc4\r\n", wait=0.5, show=False)
+
+
+def kline_raw_fast(p, name, target, reads, tries=10):
+    """
+    kline_manual_fast on ISO 9141 raw (no checksum, K only), the mode Subaru
+    SSM tools receive in without any init, with the KWP2000 framing and
+    checksum built here. LOOPBACK is on so the capture shows the exact bytes.
+    """
+    def frame(svc):
+        f = bytes([0x80 | len(svc), target, 0xF1]) + svc
+        return f + bytes([sum(f) & 0xFF])
+
+    emit(f"\n  -- {name}: fast init by hand on ISO 9141 raw, 81 {target:02X} F1 81, "
+         f"1 s listen, up to {tries} tries --")
+    p.resync()
+    p.cmd(f"ato3 {ISO9141_NO_CHECKSUM | ISO9141_K_LINE_ONLY} 10400 0\r\n".encode(),
+          wait=1.0, show=False)
+    p.cmd(b"ats3 3 1\r\n", wait=1.0, show=False)
+    p.cmd(b"atf3 1 0 1\r\n", b"\x00\x00", 1.0, show=False)
+    answered = False
+    for i in range(tries):
+        p.cmd_line(b"aty3 0 0\r\n", wait=0.5)
+        f = frame(b"\x81")
+        r = p.transmit_kline(3, f[:3], f[3:], wait=1.0)
+        r += p.drain(1.0, idle=1.0)
+        rx = [x for x in parse_frames(r) if x[0] == "FRAME" and not x[3] & 0x20]
+        if rx:
+            emit(f"      try {i + 1}: ANSWERED")
+            show_stream(r)
+            answered = True
+            break
+        emit(f"      try {i + 1}: nothing received")
+    if answered:
+        for rname, svc in reads:
+            emit(f"      [{rname}]")
+            f = frame(svc)
+            show_stream(p.transmit_kline(3, f[:3], f[3:], wait=2.0) + p.drain(1.0))
+    p.cmd(b"atc3\r\n", wait=0.5, show=False)
+
+
+def kline_listen(p, seconds):
+    """
+    Passive: records what crosses pin 7 while another tester talks to the ECU
+    through an OBD Y-splitter. Opens K raw (no checksum, K only) at 10400 baud
+    behind a pass-all filter and transmits nothing. A five-baud address is not
+    a byte at 10400 baud: expect nothing, or stray 0x00, about two seconds
+    before the ECU's 0x55.
+    """
+    emit(f"\n### KLISTEN. {seconds:g} s on pin 7, passive: nothing is transmitted")
+    p.resync()
+    p.cmd(f"ato3 {ISO9141_NO_CHECKSUM | ISO9141_K_LINE_ONLY} 10400 0\r\n".encode(),
+          wait=1.0, show=False)
+    p.cmd(b"atf3 1 0 1\r\n", b"\x00\x00", 1.0, show=False)
+    t0, total = time.time(), 0
+    while time.time() - t0 < seconds:
+        buf = p.drain(1.0, idle=1.0)
+        if buf:
+            total += len(buf)
+            emit(f"  +{time.time() - t0:7.2f}s RAW {buf.hex()}")
+            show_stream(buf)
+    emit(f"  {total} byte(s) from the cable in {seconds:g} s")
+    p.cmd(b"atc3\r\n", wait=0.5, show=False)
 
 
 def q2_kline(p, variants=None):
@@ -574,14 +748,19 @@ def q2_kline(p, variants=None):
            ("ReadEcuIdentification 1A 9A (coding)", b"\x1a\x9a"),
            ("TesterPresent 3E", b"\x3e"))
 
+    kline_echo(p)
     for variant in KLINE_INITS:
         if variants and variant[0] not in variants:
             continue
         name, proto = variant[0], variant[1]
         proto, ok = kline_init(p, variant)
         if ok:
-            physical = name.endswith("01")
+            physical = kline_vag(name)
             kline_requests(p, proto, physical, vag if physical else eobd)
+            if physical:
+                emit(f"      [the same reads to 0x{EDC16_KWP_ADDR:02X}, the EDC16's KWP2000 address]")
+                kline_requests(p, proto, physical,
+                               (("StartCommunication 81", b"\x81"),) + vag, EDC16_KWP_ADDR)
             if physical and ALLOWED_SESSION is not None:
                 emit(f"      [diagnostic session 0x{ALLOWED_SESSION:02X} allowed by the "
                      "operator; re-reading the identification set inside it]")
@@ -589,6 +768,14 @@ def q2_kline(p, variants=None):
                                (("StartDiagnosticSession 10 %02X" % ALLOWED_SESSION,
                                  bytes([0x10, ALLOWED_SESSION])),) + vag)
         p.cmd(f"atc{proto}\r\n".encode(), wait=0.5, show=False)
+    for name, target in KLINE_MANUAL:
+        if variants and name not in variants:
+            continue
+        kline_manual_fast(p, name, target, vag)
+    for name, target in KLINE_RAW:
+        if variants and name not in variants:
+            continue
+        kline_raw_fast(p, name, target, vag)
 
     emit("\n  How to read the result: analyse_capture.py decides between the")
     emit("  uniform layout (timestamp on every frame) and the asymmetric one")
@@ -717,7 +904,7 @@ def live_kline(p, variant_name, payload):
     emit(f"\n### LIVE. K-line {variant_name} then request {payload.hex(' ')}")
     proto, ok = kline_init(p, variants[0])
     if ok and payload:
-        physical = variant_name.endswith("01")
+        physical = kline_vag(variant_name)
         reqs = (("live request", payload),)
         if ALLOWED_SESSION is not None:
             reqs = (("StartDiagnosticSession 10 %02X" % ALLOWED_SESSION,
@@ -758,7 +945,7 @@ def long_read(p, tx, rx, addr, kline_variant):
             raise Unsafe(f"unknown K-line init variant {kline_variant!r}")
         proto, ok = kline_init(p, variants[0])
         if ok:
-            kline_requests(p, proto, kline_variant.endswith("01"), (("$23 KWP form", reqs[0][1]),))
+            kline_requests(p, proto, kline_vag(kline_variant), (("$23 KWP form", reqs[0][1]),))
         p.cmd(f"atc{proto}\r\n".encode(), wait=0.5, show=False)
 
 
@@ -1133,7 +1320,9 @@ def main():
                     help="also probe ISO9141/ISO14230 on pin 7 (highest-value "
                          "open question; sends a standard init pattern)")
     ap.add_argument("--kline-variants", default=None,
-                    help="comma-separated subset of " + ",".join(v[0] for v in KLINE_INITS))
+                    help="comma-separated subset of "
+                         + ",".join([v[0] for v in KLINE_INITS]
+                                    + [m[0] for m in KLINE_MANUAL + KLINE_RAW]))
     ap.add_argument("--unknown-verbs", action="store_true",
                     help="run Q5 (bare atm/atw forms, atx) — bench only")
     ap.add_argument("--request", default=None,
@@ -1159,6 +1348,8 @@ def main():
                          "with --long-read-kline); ADDR must be mapped memory on this ECU")
     ap.add_argument("--long-read-kline", default=None, metavar="VARIANT",
                     help="K-line init variant to use for --long-read, e.g. fast01")
+    ap.add_argument("--kline-listen", type=float, default=None, metavar="SECONDS",
+                    help="record pin 7 passively while another tester talks; transmits nothing")
     args = ap.parse_args()
 
     if not os.path.exists(args.dev):
@@ -1202,6 +1393,9 @@ def main():
                 ("q6", q6_protocols, ())]
     rc = 0
     try:
+        if args.kline_listen is not None:
+            kline_listen(p, args.kline_listen)
+            return rc
         need_preflight = not args.no_preflight and (live or not args.only)
         if need_preflight and not preflight(p, args.tx, args.rx):
             emit("\nAborted at pre-flight. Nothing was transmitted onto the bus.")

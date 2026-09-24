@@ -177,5 +177,6 @@ scenario really checks.
 
 The same review found the K-line frame layout had been assumed to match CAN.
 Two independent sources ([PROTOCOL.md §7.9](PROTOCOL.md)) say it does not; the
-layout was corrected from them and stays marked unconfirmed until a K-line
-recording exists.
+layout was corrected from them. The cable's own K-line echoes have since been
+recorded on the bench and follow it; frames received from an ECU stay
+unconfirmed until a K-line ECU answers.

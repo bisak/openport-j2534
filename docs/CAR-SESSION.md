@@ -77,11 +77,19 @@ directly, not through `libj2534`. These are checks in its code, not intentions.
    periodic messages, closes every channel it opened and resets the cable, so
    nothing keeps transmitting after the cable comes out.
 6. **K-line is opt-in** (`--kline`), because it drives a different physical
-   layer. It tries five wake-ups: five-baud and fast init to the EOBD address
-   0x33, five-baud and fast init to the VAG engine address 0x01, and five-baud
-   to 0x10, the Bosch default. Only StartCommunication and allowed reads follow.
-   The init commands are the ones Tactrix's DLL sends
-   ([PROTOCOL.md §4](PROTOCOL.md)).
+   layer. It first sends one OBD mode 01 request with `LOOPBACK` on, and checks
+   that the echo comes back intact: a pin 7 held low would make every wake-up
+   time out as on an empty connector. Then it tries six wake-ups: five-baud and
+   fast init to the EOBD address 0x33, five-baud and fast init to the VAG
+   engine address 0x01, five-baud to 0x10, the Bosch default, and five-baud to
+   0x01 again with `FIVE_BAUD_MOD` 3, which reports whatever key bytes arrive.
+   Last, a fast init by hand to 0x10 and to 0x01, for an ECU slower than the
+   firmware waits: the wake-up pulse alone (`aty4 0 0`), StartCommunication as a
+   raw transmit, a second's listening, up to 20 tries; then the same on ISO
+   9141 raw, where the tool frames the request itself. Only StartCommunication
+   and allowed reads follow, after a VAG wake-up to 0x01 and then to 0x10, the
+   EDC16's own KWP2000 address. The init commands are the ones Tactrix's DLL
+   sends ([PROTOCOL.md §4](PROTOCOL.md)).
 7. **Commands of unknown meaning are bench-only.** Section q5 (`atx`, and the
    bare forms of `atm` and `atw`) runs only with `--unknown-verbs`: "read-only"
    cannot be claimed for a command nobody understands.
@@ -124,12 +132,18 @@ python3 tools/car/car_capture.py --kline-init fast01 --kline-request 1A9C --out 
 python3 tools/car/car_capture.py --kline --kline-variants five01 --only q2 --no-preflight --out live-4.txt
 # VW TP2.0
 python3 tools/car/car_capture.py --tp20 --out tp20.txt
+# record pin 7 for 60 s while another tester talks, through an OBD Y-splitter;
+# transmits nothing
+python3 tools/car/car_capture.py --kline-listen 60 --out listen.txt
 # analyse them
 python3 tools/car/analyse_capture.py live-*.txt
 ```
 
 K-line init variants: `five33`, `fast33` (EOBD address 0x33), `five01`, `fast01`
-(VAG engine address 0x01), `five10` (0x10).
+(VAG engine address 0x01), `five10` (0x10), `five01m3` (0x01 with
+`FIVE_BAUD_MOD` 3), and the fast inits by hand `manual10` and `manual01` (ISO
+14230) and `raw10` and `raw01` (ISO 9141 raw, framing and checksum built by the
+tool).
 
 Sections, in run order:
 
@@ -137,7 +151,7 @@ Sections, in run order:
 |---|---|---|
 | q7 | pin voltages; pin 16 reads the battery | settled (§8) |
 | q0, q1 | received-message framing with real payload | settled on the Caddy (§7) |
-| q2 | K-line frame layout and init replies (needs `--kline`) | **open**: no K-line responder yet |
+| q2 | K-line echo, frame layout and init replies (needs `--kline`) | echo settled on the bench (§7.9); received frames **open**: no K-line responder yet |
 | q3 | `att`'s arguments, and the DLL's five-argument form | settled (§4) |
 | q8 | how the firmware reports a silent bus | settled (§6) |
 | q9 | the transmit echo with `LOOPBACK` on ISO 15765 | settled on the bench ECU: echoes on channel 5 (§7.7) |
@@ -192,10 +206,14 @@ What happened on the Audi:
   ([AB-OFFICIAL.md](AB-OFFICIAL.md#on-the-audi)).
 - **The K-line answered no init.** Every standard wake-up returned `are 7`, and
   later attempts through both drivers, including an open-source EDC16 flasher's
-  retry sequence, got no answer at any of eight VAG addresses. The line is
-  electrically present, so either pin 7 is not on a live K-line on this car or
-  the cable's five-baud waveform is not what this ECU accepts. The driver's
-  K-line code could not be exercised.
+  retry sequence, got no answer at any of eight VAG addresses. Every init
+  timed out exactly as it does on the bench with nothing on pin 7. Audi's
+  wiring diagrams connect the ECU's K-line to pin 7, the Galletto flashed it
+  there, and the cable's own K-line works. A second visit on 2026-09-24 sent
+  an open-source EDC16 tool's exact fast init by hand, with long listening and
+  across two ignition cycles, and got nothing either
+  ([AB-OFFICIAL.md](AB-OFFICIAL.md#on-the-audi)). What the Galletto sends is
+  the next thing to record. The driver's K-line code could not be exercised.
 - **TP2.0 worked.** `--tp20` opens a TP2.0 channel on the raw CAN channel and
   runs identification reads inside it. The first attempt came after the ignition
   had timed out, and the battery check refused to transmit onto a bus it could
@@ -222,7 +240,10 @@ hardware.
 
 - The EDC16C34 / EDC16U34 is a Freescale MPC562 PowerPC with external flash (the
   MPC562 has none on chip) and a serial EEPROM. The K-line is on ECU pin 72,
-  wired to OBD pin 7.
+  wired to OBD pin 7: Audi's A3 8P diagrams run T94/72 through splice B444 to
+  T16/7, on the 1.9 TDI BLS engine sheet (2006) and on diagnostic connector
+  sheet No. 152/3 (edition 09/2009). In a manual car nothing else is on that
+  wire, unless an early factory navigation unit is fitted.
 - The ECU keeps two counters in EEPROM: OBD programming attempts and successful
   OBD programmings. They move only when a programming session is entered; bench
   and boot-mode reads do not touch them, and neither does diagnostics. Nothing

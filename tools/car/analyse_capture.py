@@ -109,7 +109,12 @@ def q_kline(sections):
             elif b[:3] == b"\x7f\x1a\x80" or b.find(b"\x7f\x1a\x80") >= 0:
                 print("\nFlash status record: 1A refused with NRC 0x80 (not in this session). "
                       "Re-run with --allow-diag-session to open VCDS's diagnostic session 10 89.")
-    kl = [f for f in s["frames"] if f["ch"] in (3, 4)]
+    # The echo check's LOOPBACK frames show the cable's own K-line works; they
+    # are not received data and say nothing about the receive layout.
+    echo = [f for f in s["frames"] if f["ch"] in (3, 4) and f["sts"] & 0x20]
+    if echo:
+        print(f"\nK-line echo\n  {len(echo)} loopback frame(s); see the ECHO line in the capture")
+    kl = [f for f in s["frames"] if f["ch"] in (3, 4) and not f["sts"] & 0x20]
     if not kl:
         return verdict("K-line frame layout",
                        "UNRESOLVED — no K-line frames captured. Either pin 7 has "
