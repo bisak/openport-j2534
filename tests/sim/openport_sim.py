@@ -105,9 +105,7 @@ class Channel:
         self.config = dict(PARAMS_BY_PROTOCOL.get(proto, _CAN_PARAMS))
         self.config[1] = baud
         self.filters = {}          # id -> (type, mask, pattern, flowcontrol)
-        self.next_filter_id = 0
         self.periodic = {}         # id -> (interval, payload)
-        self.next_periodic_id = 0
 
 
 class Tp20State:
@@ -266,6 +264,11 @@ class OpenPortSim:
         self.cmd_count = 0
         self._seq = None
         self.closed = False
+        # Measured on the cable 2026-09-24: filter ids count up across every
+        # channel and restart at `ata`/`atz`; periodic ids count up across
+        # channels and sessions alike, never restarting while powered.
+        self.next_filter_id = 0
+        self.next_periodic_id = 0
         self._out = b""
         self._lock = threading.Lock()
         self._rng = 0x2545F4914F6CDD1D
@@ -414,6 +417,7 @@ class OpenPortSim:
         if verb in ("a", "z"):
             # Both also switch every voltage output off (measured 2026-09-16).
             self.channels.clear()
+            self.next_filter_id = 0
             READABLE_PINS[12] = 0
             READABLE_PINS[17] = VADJ_IDLE_MV
             return self._ok()
@@ -546,11 +550,15 @@ class OpenPortSim:
         try: ftype, _txf, each = int(args[0]), int(args[1]), int(args[2])
         except ValueError: return self._err(ERR_FAILED)
         need = {1: 2, 2: 2, 3: 3}.get(ftype, 0)
-        if need == 0 or len(payload) != need * each:
+        if need == 0:                   # types 0 and 4, measured 2026-09-24
+            return self._err(ERR_INVALID_FILTER_ID)
+        if len(payload) != need * each:
             return self._err(ERR_INVALID_MSG)
         msgs = [payload[i * each:(i + 1) * each] for i in range(need)]
-        fid = c.next_filter_id
-        c.next_filter_id += 1
+        if len(c.filters) >= 10:        # the eleventh on a channel, measured 2026-09-24
+            return self._err(12)
+        fid = self.next_filter_id
+        self.next_filter_id += 1
         c.filters[fid] = (ftype, *msgs) if need == 3 else (ftype, msgs[0], msgs[1], None)
         self._reply(self._with_seq(f"arf{ch} {fid}") if self._seq is not None else f"arf{ch} {fid} 0\r\n")
 
@@ -770,8 +778,8 @@ class OpenPortSim:
             return self._err(ERR_INVALID_MSG)
         if len(c.periodic) >= 10:
             return self._err(12)
-        pid = c.next_periodic_id
-        c.next_periodic_id += 1
+        pid = self.next_periodic_id
+        self.next_periodic_id += 1
         c.periodic[pid] = (interval_us / 1e6, bytes(payload), txflags)
         threading.Thread(target=self._periodic_run, args=(ch, c, pid), daemon=True).start()
         self._reply(self._with_seq(f"arm{ch} {pid}"))
