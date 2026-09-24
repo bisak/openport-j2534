@@ -125,11 +125,6 @@ static void periodic_is_firmware_scheduled(void)
     m.DataSize   = 6;
     m.Data[3] = 0xE0; m.Data[4] = 0x3E; m.Data[5] = 0x00;
 
-    CHECK_EQ(PassThruStartPeriodicMsg(ch, &m, &id, 0),
-             ERR_INVALID_TIME_INTERVAL, "interval below the J2534 minimum");
-    CHECK_EQ(PassThruStartPeriodicMsg(ch, &m, &id, 70000),
-             ERR_INVALID_TIME_INTERVAL, "interval above the J2534 maximum");
-
     mock_clear_tx();
     CHECK_EQ(PassThruStartPeriodicMsg(ch, &m, &id, 100), STATUS_NOERROR,
              "StartPeriodicMsg accepted");
@@ -148,6 +143,19 @@ static void periodic_is_firmware_scheduled(void)
     CHECK(tx_contains("atn6 0 "), "the firmware is told to stop it");
     CHECK_EQ(PassThruStopPeriodicMsg(ch, id), ERR_INVALID_MSG_ID,
              "a stopped message is forgotten");
+
+    /* Outside J2534's 5-65535 ms, forwarded as the vendor DLL forwards it. */
+    mock_clear_tx();
+    CHECK_EQ(PassThruStartPeriodicMsg(ch, &m, &id, 1), STATUS_NOERROR,
+             "a 1 ms interval goes to the firmware, which runs it");
+    CHECK(tx_contains("atm6 1000 0 64 6 "), "as 1000 us");
+    CHECK_EQ(PassThruStartPeriodicMsg(ch, &m, &id, 70000), STATUS_NOERROR,
+             "and so does 70 s");
+    CHECK_EQ(PassThruStartPeriodicMsg(ch, &m, &id, 4294968),
+             ERR_INVALID_TIME_INTERVAL, "only an interval the microsecond field cannot hold is refused");
+    m.DataSize = 3;
+    CHECK_EQ(PassThruStartPeriodicMsg(ch, &m, &id, 100), ERR_INVALID_MSG,
+             "a message too short to carry a CAN id is refused, as WriteMsgs refuses it");
     shut(dev);
 }
 
@@ -481,12 +489,16 @@ static void filters(void)
     CHECK_EQ(PassThruStartMsgFilter(ch, 42, &mask, &pat, &fc, &fid),
              ERR_INVALID_MSG, "unknown filter type rejected");
 
-    /* DEC2004 7.2.9.2: flow control on a PASS/BLOCK filter is an error.
-     * Silently ignoring it would let a caller think it had been applied. */
+    /* A flow-control message on a PASS/BLOCK filter is ignored, as the
+     * vendor DLL ignores it: two messages go out, with the mask's flags. */
+    mock_clear_tx();
+    fc.TxFlags = ISO15765_FRAME_PAD;
     CHECK_EQ(PassThruStartMsgFilter(ch, PASS_FILTER, &mask, &pat, &fc, &fid),
-             ERR_INVALID_MSG, "flow control on a PASS filter rejected");
+             STATUS_NOERROR, "flow control on a PASS filter ignored");
+    CHECK(tx_contains("atf6 1 0 4 "), "with the mask's flags, not the ignored message's");
     CHECK_EQ(PassThruStartMsgFilter(ch, BLOCK_FILTER, &mask, &pat, &fc, &fid),
-             ERR_INVALID_MSG, "flow control on a BLOCK filter rejected");
+             STATUS_NOERROR, "flow control on a BLOCK filter ignored");
+    fc.TxFlags = 0;
     CHECK_EQ(PassThruStartMsgFilter(ch, PASS_FILTER, &mask, &pat, NULL, &fid),
              STATUS_NOERROR, "PASS filter without flow control accepted");
 
@@ -744,6 +756,62 @@ static void filter_takes_flow_control_flags(void)
     CHECK_EQ(PassThruStartMsgFilter(ch, PASS_FILTER, &mask, &pat, NULL, &fid),
              STATUS_NOERROR, "pass filter installed");
     CHECK(tx_contains("atf6 1 0 4"), "a pass filter still uses the mask's flags");
+    shut(dev);
+}
+
+/* Answers `are 1` for configuration parameter 127, as the firmware answers any
+ * parameter a protocol lacks; every other `atg` reads 7. */
+static void unsupported_param_responder(const char *line, size_t len,
+                                        const uint8_t *payload, size_t payload_len)
+{
+    char buf[64], r[48];
+    unsigned ch = 0, p = 0;
+    size_t copy = len < sizeof buf - 1 ? len : sizeof buf - 1;
+    (void)payload; (void)payload_len;
+    memcpy(buf, line, copy); buf[copy] = '\0';
+    if (strncmp(buf, "ati", 3) == 0) { mock_push_str("ari main code version : 1.17.4877\r\n"); return; }
+    if ((strncmp(buf, "atg", 3) == 0 || strncmp(buf, "ats", 3) == 0) &&
+        sscanf(buf + 3, "%u %u", &ch, &p) == 2) {
+        if (p == 127) { mock_push_reply("are 1"); return; }
+        if (buf[2] == 'g') { snprintf(r, sizeof r, "arg%u %u 7", ch, p); mock_push_reply(r); return; }
+    }
+    mock_push_reply("aro");
+}
+
+/* Tactrix's DLL goes through a whole GET/SET_CONFIG list and returns the
+ * status of its last parameter (tools/ab-official, 2026-09-24). */
+static void config_lists_go_through(void)
+{
+    J_U32 dev = 0, ch = 0;
+    SCONFIG cfg[3];
+    SCONFIG_LIST list;
+
+    mock_reset();
+    mock_set_responder(unsupported_param_responder);
+    op_device_set_factory(mock_open);
+    CHECK_EQ(PassThruOpen(NULL, &dev), STATUS_NOERROR, "Open");
+    CHECK_EQ(PassThruConnect(dev, ISO15765, 0, 500000, &ch), STATUS_NOERROR, "Connect");
+    list.NumOfParams = 3; list.ConfigPtr = cfg;
+
+    cfg[0].Parameter = LOOPBACK;    cfg[0].Value = 0;
+    cfg[1].Parameter = 127;         cfg[1].Value = 0;
+    cfg[2].Parameter = ISO15765_BS; cfg[2].Value = 8;
+    mock_clear_tx();
+    CHECK_EQ(PassThruIoctl(ch, SET_CONFIG, &list, NULL), STATUS_NOERROR,
+             "an unsupported parameter mid-list does not fail the list");
+    CHECK(tx_contains("ats6 127 0 ") && tx_contains("ats6 30 8 "),
+          "it is sent, and so are the parameters after it");
+
+    cfg[1].Parameter = ISO15765_BS; cfg[2].Parameter = 127;
+    CHECK_EQ(PassThruIoctl(ch, SET_CONFIG, &list, NULL), ERR_NOT_SUPPORTED,
+             "the last parameter's status is the list's");
+
+    cfg[0].Parameter = 127;       cfg[0].Value = 0xDEAD;
+    cfg[1].Parameter = DATA_RATE; cfg[1].Value = 0xDEAD;
+    list.NumOfParams = 2;
+    CHECK_EQ(PassThruIoctl(ch, GET_CONFIG, &list, NULL), STATUS_NOERROR, "GET_CONFIG likewise");
+    CHECK_EQ(cfg[0].Value, 0xDEAD, "the unsupported parameter's value is left alone");
+    CHECK_EQ(cfg[1].Value, 7, "the one after it is read");
     shut(dev);
 }
 
@@ -1116,6 +1184,7 @@ void test_j2534(void)
     device_absent();
     filters();
     ioctls();
+    config_lists_go_through();
     read_version();
     last_error_is_useful();
     receive_path();

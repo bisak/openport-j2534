@@ -483,6 +483,26 @@ closed:
 
 /* ---- 6. PassThruWriteMsgs ----------------------------------------------- */
 
+/* The size limits of J2534-1 Figure 42, where they are certain for this
+ * hardware; ISO14230's maximum depends on the checksum flag and is left to
+ * the device. Checked for periodic messages too: the firmware refuses a short
+ * `att` itself but runs a 3-byte `atm`, a CAN id it cannot form, every
+ * interval (bench cable, 2026-09-24). */
+static long msg_size_ok(op_device *d, J_U32 channel, const PASSTHRU_MSG *m)
+{
+    J_U32 proto = op_protocol_base(d->ch[channel].protocol);
+    size_t lo = 1, hi = sizeof m->Data;
+    if (proto == CAN)            { lo = 4; hi = 12; }
+    else if (proto == ISO15765)  { lo = (m->TxFlags & ISO15765_ADDR_TYPE) ? 5 : 4;
+                                   hi = (m->TxFlags & ISO15765_ADDR_TYPE) ? 4100 : 4099; }
+    if (m->DataSize < lo || m->DataSize > hi) {
+        op_err_set("message of %lu bytes is outside the %zu-%zu range this "
+                   "protocol allows", (unsigned long)m->DataSize, lo, hi);
+        return ERR_INVALID_MSG;
+    }
+    return STATUS_NOERROR;
+}
+
 static long write_one(op_device *d, J_U32 channel, const PASSTHRU_MSG *m,
                       unsigned timeout_ms)
 {
@@ -492,22 +512,8 @@ static long write_one(op_device *d, J_U32 channel, const PASSTHRU_MSG *m,
 
     if (m->DataSize == 0 || m->DataSize > sizeof m->Data)
         return ERR_INVALID_MSG;
-
-    /* The size limits of J2534-1 Figure 42, where they are certain for this
-     * hardware; ISO14230's maximum depends on the checksum flag and is left
-     * to the device. */
-    {
-        J_U32 proto = op_protocol_base(d->ch[channel].protocol);
-        size_t lo = 1, hi = sizeof m->Data;
-        if (proto == CAN)            { lo = 4; hi = 12; }
-        else if (proto == ISO15765)  { lo = (m->TxFlags & ISO15765_ADDR_TYPE) ? 5 : 4;
-                                       hi = (m->TxFlags & ISO15765_ADDR_TYPE) ? 4100 : 4099; }
-        if (m->DataSize < lo || m->DataSize > hi) {
-            op_err_set("message of %lu bytes is outside the %zu-%zu range this "
-                       "protocol allows", (unsigned long)m->DataSize, lo, hi);
-            return ERR_INVALID_MSG;
-        }
-    }
+    if (msg_size_ok(d, channel, m) != STATUS_NOERROR)
+        return ERR_INVALID_MSG;
 
     /* ISO 15765-4 clause 8.1: a receiver ignores a diagnostic frame with a
      * DLC below eight, and the device pads only on ISO15765_FRAME_PAD. TxFlags
@@ -640,9 +646,13 @@ long PassThruStartPeriodicMsg(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
     c = channel_of(d, ChannelID);
     if (c == NULL)
         return fail(ERR_INVALID_CHANNEL_ID, "PassThruStartPeriodicMsg");
-    if (TimeInterval < 5 || TimeInterval > 65535)
+    /* Any interval the firmware's microsecond field can carry. J2534 asks for
+     * 5-65535 ms; Tactrix's DLL forwards 4 ms and 65 536 s alike and the
+     * firmware runs them (1 ms held, PROTOCOL.md section 10). */
+    if (TimeInterval > 0xFFFFFFFFu / 1000u)
         return fail(ERR_INVALID_TIME_INTERVAL, "PassThruStartPeriodicMsg");
-    if (pMsg->DataSize == 0 || pMsg->DataSize > sizeof pMsg->Data)
+    if (pMsg->DataSize == 0 || pMsg->DataSize > sizeof pMsg->Data ||
+        msg_size_ok(d, ChannelID, pMsg) != STATUS_NOERROR)
         return fail(ERR_INVALID_MSG, "PassThruStartPeriodicMsg");
     if (c->nperiodic >= OP_PERIODIC_PER_CH)
         return fail(ERR_EXCEEDED_LIMIT, "PassThruStartPeriodicMsg");
@@ -730,13 +740,12 @@ long PassThruStartMsgFilter(J_U32 ChannelID, J_U32 FilterType,
         return fail(ERR_NULL_PARAMETER, "PassThruStartMsgFilter(mask/pattern)");
     if (need == 3 && pFlowControlMsg == NULL)
         return fail(ERR_NULL_PARAMETER, "PassThruStartMsgFilter(flow control)");
-    /* J2534-1 DEC2004 section 7.2.9.2: a flow-control message supplied for a
-     * PASS or BLOCK filter is an error, not something to ignore. Accepting it
-     * silently would let a caller believe flow control had been configured on
-     * a filter type that has none. */
-    if (need == 2 && pFlowControlMsg != NULL)
-        return fail(ERR_INVALID_MSG,
-                    "PassThruStartMsgFilter: flow control on a PASS/BLOCK filter");
+    /* A flow-control message given with a PASS or BLOCK filter is ignored, as
+     * Tactrix's DLL ignores it (tools/ab-official, 2026-09-24). J2534-1
+     * DEC2004 section 7.2.9.2 calls it an error, but refusing it failed
+     * applications that pass a zeroed message instead of NULL. */
+    if (need == 2)
+        pFlowControlMsg = NULL;
 
     msgs[0] = pMaskMsg;
     msgs[1] = pPatternMsg;
@@ -902,9 +911,18 @@ long PassThruGetLastError(char *pErrorDescription)
 
 /* ---- 14. PassThruIoctl -------------------------------------------------- */
 
+/*
+ * GET_CONFIG and SET_CONFIG go through the whole list and return the status
+ * of its last parameter, as Tactrix's DLL does (tools/ab-official, 2026-09-24:
+ * [3, 127] -> ERR_NOT_SUPPORTED, [127, 3] -> 0, every parameter sent). An
+ * application written against it that lists a parameter this firmware lacks
+ * still gets the rest applied; stopping at the first failure left them unset
+ * and turned its success into an error. An earlier failure goes to the log.
+ */
 static long ioctl_get_config(op_device *d, J_U32 ChannelID, SCONFIG_LIST *list)
 {
     J_U32 i;
+    long rc = STATUS_NOERROR;
     if (list == NULL || (list->NumOfParams > 0 && list->ConfigPtr == NULL))
         return ERR_NULL_PARAMETER;
 
@@ -912,37 +930,38 @@ static long ioctl_get_config(op_device *d, J_U32 ChannelID, SCONFIG_LIST *list)
         char line[OP_CMD_MAX];
         size_t n;
         op_reply r;
-        long rc;
 
         n = op_cmd_get_config(line, sizeof line, (unsigned)ChannelID,
                               (uint32_t)list->ConfigPtr[i].Parameter);
         rc = simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, &r);
-        if (rc != STATUS_NOERROR) return rc;
-        if (r.kind != OP_REPLY_CONFIG) return ERR_FAILED;
-        list->ConfigPtr[i].Value = r.b;
+        if (rc == STATUS_NOERROR && r.kind != OP_REPLY_CONFIG) rc = ERR_FAILED;
+        if (rc == STATUS_NOERROR) list->ConfigPtr[i].Value = r.b;
+        else op_logf("GET_CONFIG parameter %lu: %s", (unsigned long)list->ConfigPtr[i].Parameter, op_err_name(rc));
     }
-    return STATUS_NOERROR;
+    return rc;
 }
 
 static long ioctl_set_config(op_device *d, J_U32 ChannelID,
                              const SCONFIG_LIST *list)
 {
     J_U32 i;
+    long rc = STATUS_NOERROR;
     if (list == NULL || (list->NumOfParams > 0 && list->ConfigPtr == NULL))
         return ERR_NULL_PARAMETER;
 
     for (i = 0; i < list->NumOfParams; i++) {
         char line[OP_CMD_MAX];
         size_t n;
-        long rc;
 
         n = op_cmd_set_config(line, sizeof line, (unsigned)ChannelID,
                               (uint32_t)list->ConfigPtr[i].Parameter,
                               (uint32_t)list->ConfigPtr[i].Value);
         rc = simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
-        if (rc != STATUS_NOERROR) return rc;
+        if (rc != STATUS_NOERROR)
+            op_logf("SET_CONFIG parameter %lu = %lu: %s", (unsigned long)list->ConfigPtr[i].Parameter,
+                    (unsigned long)list->ConfigPtr[i].Value, op_err_name(rc));
     }
-    return STATUS_NOERROR;
+    return rc;
 }
 
 static long ioctl_read_pin(op_device *d, unsigned pin, J_U32 *out)
