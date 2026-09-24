@@ -145,6 +145,12 @@ size_t op_cmd_filter(char *out, size_t out_sz, unsigned ch,
                      uint32_t type, uint32_t txflags, size_t each_len); /* atf */
 size_t op_cmd_stop_filter(char *out, size_t out_sz,
                           unsigned ch, uint32_t filter_id);        /* atk */
+/* atk<ch> -1 removes every filter on the channel and atl<ch> stops every
+ * periodic message on it: what Tactrix's DLL sends for CLEAR_MSG_FILTERS and
+ * CLEAR_PERIODIC_MSGS, and on the cable the old ids answer `are 22` and
+ * `are 13` afterwards (tools/ab-official, 2026-09-24). */
+size_t op_cmd_clear_filters(char *out, size_t out_sz, unsigned ch);  /* atk -1 */
+size_t op_cmd_clear_periodic(char *out, size_t out_sz, unsigned ch); /* atl */
 /* atm<ch> <interval_us> 0 <txflags> <len> + payload: the firmware's periodic
  * message in the form Tactrix's DLL sends it (PROTOCOL.md section 4); the
  * reply is arm<ch> <id>. atn<ch> <id> stops it. */

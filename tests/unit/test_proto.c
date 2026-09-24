@@ -43,6 +43,10 @@ static void encoders(void)
 
     op_cmd_stop_filter(b, sizeof b, 6, 0);
     CHECK_STR(b, "atk6 0\r\n", "atk");
+    op_cmd_clear_filters(b, sizeof b, 5);
+    CHECK_STR(b, "atk5 -1\r\n", "atk -1 clears every filter");
+    op_cmd_clear_periodic(b, sizeof b, 5);
+    CHECK_STR(b, "atl5\r\n", "atl clears every periodic message");
 
     /* Refuse rather than truncate: a half-written line desyncs the device. */
     CHECK_EQ(op_cmd_open(b, 4, 6, 0, 500000), 0, "ato into a short buffer");

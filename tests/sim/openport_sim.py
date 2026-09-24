@@ -414,7 +414,7 @@ class OpenPortSim:
         if verb == "s":  return self._cmd_set_config(rest)
         if verb == "f":  return self._cmd_filter(rest, payload)
         if verb == "k":  return self._cmd_stop_filter(rest)
-        if verb == "l":  return self._ok()
+        if verb == "l":  return self._cmd_clear_periodic(rest)
         if verb == "t":  return self._cmd_transmit(rest, payload)
         if verb == "y":  return self._cmd_init(rest, payload, five_baud=False)
         if verb == "w":  return self._cmd_init(rest, payload, five_baud=True)
@@ -548,6 +548,9 @@ class OpenPortSim:
         if c is None: return self._err(ERR_FAILED)
         try: fid = int(args[0])
         except ValueError: return self._err(ERR_FAILED)
+        if fid == -1:                 # every filter on the channel, measured 2026-09-24
+            c.filters.clear()
+            return self._ok()
         if fid not in c.filters: return self._err(ERR_INVALID_FILTER_ID)
         del c.filters[fid]
         self._ok()
@@ -776,6 +779,16 @@ class OpenPortSim:
             resp = self._ecu_response(ch, payload)
             if resp is not None:
                 self.send_message(ch, resp)
+
+    def _cmd_clear_periodic(self, rest):
+        """`atl<ch>`: stops every periodic message on the channel; `atn` of an
+        old id then answers `are 13`. The vendor DLL's CLEAR_PERIODIC_MSGS,
+        measured on the cable 2026-09-24. Without a channel digit, `aro`."""
+        ch, _ = self._split_ch(rest)
+        c = self.channels.get(ch) if ch is not None else None
+        if c is not None:
+            c.periodic.clear()
+        self._ok()
 
     def _cmd_periodic_stop(self, rest):
         ch, args = self._split_ch(rest)

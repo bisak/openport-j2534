@@ -228,9 +228,9 @@ static void periodic_limit_is_per_channel(void)
              "and its id does not stop a message on the first channel");
     mock_clear_tx();
     CHECK_EQ(PassThruIoctl(can, CLEAR_PERIODIC_MSGS, NULL, NULL), STATUS_NOERROR, "clear");
-    CHECK(tx_contains("atn5 0 ") && tx_contains("atn5 9 "), "every id on the channel is stopped");
+    CHECK(tx_contains("atl5 ") && !tx_contains("atn"), "one atl stops every message on the channel, as the vendor DLL does");
     CHECK_EQ(PassThruIoctl(iso, CLEAR_PERIODIC_MSGS, NULL, NULL), STATUS_NOERROR, "clear");
-    CHECK(tx_contains("atn6 10 "), "on the other channel too");
+    CHECK(tx_contains("atl6 "), "on the other channel too");
     CHECK_EQ(PassThruStartPeriodicMsg(can, &m, &id, 1000), STATUS_NOERROR,
              "and the channel has room again");
     shut(dev);
@@ -545,8 +545,10 @@ static void ioctls(void)
              "CLEAR_TX_BUFFER");
     CHECK_EQ(PassThruIoctl(ch, CLEAR_PERIODIC_MSGS, NULL, NULL), STATUS_NOERROR,
              "CLEAR_PERIODIC_MSGS is implemented");
+    mock_clear_tx();
     CHECK_EQ(PassThruIoctl(ch, CLEAR_MSG_FILTERS, NULL, NULL), STATUS_NOERROR,
              "CLEAR_MSG_FILTERS is implemented");
+    CHECK(tx_contains("atk6 -1 "), "as one atk -1, which reaches filter ids past any host-side table");
 
     /* J1850 only, and this device rejects J1850 outright. Saying so is better
      * than a silent success the caller cannot detect. */

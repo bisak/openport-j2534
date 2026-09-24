@@ -430,6 +430,16 @@ size_t op_cmd_stop_filter(char *out, size_t out_sz, unsigned ch, uint32_t filter
     return emit(out, out_sz, "atk%u %lu\r\n", ch, (unsigned long)filter_id);
 }
 
+size_t op_cmd_clear_filters(char *out, size_t out_sz, unsigned ch)
+{
+    return emit(out, out_sz, "atk%u -1\r\n", ch);
+}
+
+size_t op_cmd_clear_periodic(char *out, size_t out_sz, unsigned ch)
+{
+    return emit(out, out_sz, "atl%u\r\n", ch);
+}
+
 size_t op_cmd_periodic_start(char *out, size_t out_sz, unsigned ch,
                              uint32_t interval_us, uint32_t txflags,
                              size_t payload_len)

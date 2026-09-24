@@ -370,7 +370,7 @@ static void openport_responder(const char *line, size_t len,
             snprintf(r, sizeof r, "arm%u %u", ch, g_next_periodic++);
             mock_push_reply(r);
         }
-    } else if (strncmp(buf, "atn", 3) == 0) {
+    } else if (strncmp(buf, "atn", 3) == 0 || strncmp(buf, "atl", 3) == 0) {
         mock_push_reply("aro");
     } else {
         mock_push_reply("are 7");

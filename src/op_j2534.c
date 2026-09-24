@@ -782,7 +782,6 @@ long PassThruStartMsgFilter(J_U32 ChannelID, J_U32 FilterType,
 
     *pFilterID = r.a;
     rec_line("= %lu", (unsigned long)r.a);
-    d->ch[ChannelID].filters |= (1u << (r.a & 31u));
     op_logf("filter %lu set on channel %lu", (unsigned long)r.a,
             (unsigned long)ChannelID);
     return STATUS_NOERROR;
@@ -807,8 +806,6 @@ long PassThruStopMsgFilter(J_U32 ChannelID, J_U32 FilterID)
                            (uint32_t)FilterID);
     rc = simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
     if (rc != STATUS_NOERROR) return fail(rc, "PassThruStopMsgFilter");
-
-    d->ch[ChannelID].filters &= ~(1u << (FilterID & 31u));
     return STATUS_NOERROR;
 }
 
@@ -1119,8 +1116,7 @@ long PassThruIoctl(J_U32 ChannelID, J_U32 IoctlID, const void *pInput,
     case CLEAR_TX_BUFFER:
     case CLEAR_RX_BUFFER:
         /* Host-side only, as the vendor DLL does it: the queue the
-         * application reads from lives here. `atl` exists on the device but
-         * what it clears is unmeasured, and the vendor never sends it. */
+         * application reads from lives here. */
         if (channel_of(d, ChannelID) == NULL)
             return fail(ERR_INVALID_CHANNEL_ID, "PassThruIoctl(CLEAR_*_BUFFER)");
         op_device_flush_channel(d, (unsigned)ChannelID);
@@ -1128,27 +1124,26 @@ long PassThruIoctl(J_U32 ChannelID, J_U32 IoctlID, const void *pInput,
 
     case CLEAR_PERIODIC_MSGS: {
         op_channel *c = channel_of(d, ChannelID);
+        long rc;
         if (c == NULL)
             return fail(ERR_INVALID_CHANNEL_ID, "PassThruIoctl(CLEAR_PERIODIC_MSGS)");
-        while (c->nperiodic > 0) {
-            unsigned before = c->nperiodic;
-            long rc = periodic_stop(d, c, ChannelID, c->nperiodic - 1);
-            if (c->nperiodic == before)
-                return fail(rc, "PassThruIoctl(CLEAR_PERIODIC_MSGS)");
-        }
+        n = op_cmd_clear_periodic(line, sizeof line, (unsigned)ChannelID);
+        rc = simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
+        if (rc != STATUS_NOERROR) return fail(rc, "PassThruIoctl(CLEAR_PERIODIC_MSGS)");
+        c->nperiodic = 0;
         return STATUS_NOERROR;
     }
 
     case CLEAR_MSG_FILTERS: {
-        unsigned id;
+        long rc;
         if (channel_of(d, ChannelID) == NULL)
             return fail(ERR_INVALID_CHANNEL_ID, "PassThruIoctl(CLEAR_MSG_FILTERS)");
-        for (id = 0; id < 32u; id++) {
-            if ((d->ch[ChannelID].filters & (1u << id)) == 0) continue;
-            n = op_cmd_stop_filter(line, sizeof line, (unsigned)ChannelID, id);
-            (void)simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
-        }
-        d->ch[ChannelID].filters = 0;
+        /* One command for all of them. The firmware never reuses a filter id
+         * within a session, so ids outgrow any fixed table the host could
+         * keep (tools/ab-official, 2026-09-24). */
+        n = op_cmd_clear_filters(line, sizeof line, (unsigned)ChannelID);
+        rc = simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
+        if (rc != STATUS_NOERROR) return fail(rc, "PassThruIoctl(CLEAR_MSG_FILTERS)");
         return STATUS_NOERROR;
     }
 

@@ -47,7 +47,6 @@ typedef struct {
     unsigned     qcount;         /* messages in the ring */
     unsigned     dropped;        /* queue overruns since last read */
 
-    uint32_t     filters;        /* bitmask of live filter ids */
     uint32_t     periodic[OP_PERIODIC_PER_CH]; /* live firmware periodic ids */
     unsigned     nperiodic;
 } op_channel;
