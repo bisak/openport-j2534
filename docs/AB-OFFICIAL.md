@@ -1,178 +1,203 @@
 # A/B against the vendor's own driver
 
 Tactrix ships one consumer of the cable's firmware: `op20pt32.dll`, a 32-bit
-Windows library, packed with a commercial protector. It is the authority on
-what the firmware accepts and how its replies are meant to be read; before
-this harness existed, every claim about that in `PROTOCOL.md` came from
-sweeping the cable or from third parties. This harness runs the DLL itself, on this Mac, against the
-same simulator and the same cable as `libj2534.dylib`, drives both through one
-scripted sequence, and diffs what they returned and what they put on the wire.
+Windows library packed with a commercial protector. It is the reference for
+what the firmware accepts and how its replies are meant to be read; before this
+harness existed, every such claim in `PROTOCOL.md` came from sweeping the cable
+or from third parties. The harness runs the DLL itself on an Apple Silicon Mac,
+against the same simulator and the same cable as `libj2534.dylib`, drives both
+through one scripted sequence, and compares what they returned and what they
+put on the wire.
+
+## Running it
+
+Requirements: macOS on an arm64 host (the container is native arm64), Docker,
+the mingw-w64 cross compiler (`brew install mingw-w64`) and a copy of
+`op20pt32.dll`, named by `AB_DLL`.
+
+Both drivers against the simulator:
 
 ```bash
-make ab-official                                   # both against the simulator
-make ab-official-cable CABLE=/dev/cu.usbmodemXXXX  # both against the cable
-make ab-official AB_ARGS="-- open bench --cycles 50"
+make ab-official AB_DLL=/path/to/op20pt32.dll
 ```
 
-Artifacts land in `tools/ab-official/out/`: `vendor.jsonl` / `ours.jsonl`
-(one JSON line per call: arguments, return code, error text, outputs,
-microseconds), `vendor.tap` / `ours.tap` (every byte both ways, timestamped),
+Both drivers against the cable:
+
+```bash
+make ab-official-cable AB_DLL=/path/to/op20pt32.dll CABLE=/dev/cu.usbmodemXXXX
+```
+
+`AB_ARGS` passes arguments through to `ab.sh`; after `--` they name the
+scenarios (`open iso15765 multiframe timeouts errors periodic raw_can kline
+bench`, the four `sweep_*` scenarios or `sweep` for all four, and `edge`). The
+default is every scenario except `kline`, `bench`, the sweeps and `edge`.
+
+```bash
+make ab-official AB_DLL=/path/to/op20pt32.dll AB_ARGS="-- open bench --cycles 50"
+```
+
+Artifacts land in `tools/ab-official/out/`: `vendor.jsonl` and `ours.jsonl` (one
+JSON line per call: arguments, return code, error text, outputs,
+microseconds), `vendor.tap` and `ours.tap` (every byte both ways, timestamped),
 the simulator logs, and `report.md` from `ab_diff.py`.
 
 ## How the DLL runs without Windows
 
-The DLL only exists unpacked inside a running process, and on Windows it talks
-to the cable through `openport.sys`, a 20 KB KMDF bulk read/write driver built
-from the WDK sample. Everything it says to the cable is `ReadFile`/`WriteFile`
-on that pipe. On macOS the same cable is a CDC-ACM tty, and the simulator is a
-pty. So the job is to run the DLL under Wine and splice its device handle onto
-a pty. Four things had to be true, and each was established by an experiment
-rather than assumed:
+The DLL exists unpacked only inside a running process. On Windows it talks to
+the cable through `openport.sys`, a 20 KB KMDF bulk read/write driver built from
+the WDK sample, so everything it says to the cable is `ReadFile`/`WriteFile` on
+that pipe. On macOS the same cable is a CDC-ACM tty, and the simulator is a pty.
+The job is therefore to run the DLL under Wine and splice its device handle
+onto a pty. Four things had to be true, and each was established by an
+experiment:
 
-1. **Which emulation stack executes the packed DLL.** Three failed, differently:
-   Wine for macOS (its WoW64 layer faults inside its own exception dispatch
-   when the protector raises the privileged-instruction exceptions it uses for
-   control flow); Docker amd64 under Rosetta (Rosetta aborts on Wine's
-   signal-return path); Docker i386 under qemu-user (Wine's mmap-alignment
-   assertion). The stack that works is a native arm64 container with **box64**
-   translating an x86-64 **Wine 11.17 wow64** build, and only with
+1. Which emulation stack executes the packed DLL (2026-09-13, Apple M4 Max).
+   Three failed, differently: Wine for macOS (its WoW64 layer faults inside its
+   own exception dispatch when the protector raises the privileged-instruction
+   exceptions it uses for control flow); Docker amd64 under Rosetta (Rosetta
+   aborts on Wine's signal-return path); Docker i386 under qemu-user (Wine's mmap-alignment
+   assertion). The stack that works is a native arm64 container with box64
+   translating an x86-64 Wine 11.17 wow64 build, and only with
    `BOX64_DYNAREC=0`: the dynarec mis-executes the protector's self-modifying
    code and the DLL exits silently during `LoadLibrary`. The interpreter runs
-   it in about five seconds end to end; the DLL is I/O bound. `Dockerfile`
+   it in about five seconds end to end; the DLL is I/O bound. The `Dockerfile`
    pins all of it.
-2. **How the DLL finds the cable.** `WINEDEBUG=+relay` showed it, no
-   disassembly needed: `SetupDiGetClassDevsW` on interface class
+2. How the DLL finds the cable. `WINEDEBUG=+relay` showed it, with no
+   disassembly: `SetupDiGetClassDevsW` on interface class
    `{6d1781b7-c987-4f6c-8d4f-1efc098bea67}` with `DIGCF_PRESENT`, then
    `SetupDiEnumDeviceInterfaces`, then `CreateFileW` on the returned symbolic
    link. Wine answers SetupDi from the registry, so `iface.reg` fabricates one
-   present interface; Wine's setupapi computes its link as
+   present interface. Wine's setupapi computes its link as
    `\\?\usb#vid_0403&pid_cc4d#op20ab001#{guid}`, and Wine's ntdll resolves a
    plain `\??\name` through `$WINEPREFIX/dosdevices/name`. A symlink there to
    the pty is the whole splice.
-3. **Read semantics.** The DLL issues one overlapped `ReadFile` of 8191 bytes
-   from a reader thread and expects it to complete when a USB packet arrives.
-   Wine treats the pty as a serial port with zero `COMMTIMEOUTS`, so that read
-   waits for all 8191 bytes and the version reply never arrives (the DLL then
-   sends `tbi` three times and gives up, see below). Wine completes an
-   overlapped serial read on the first byte, and never with zero bytes, when
-   only `ReadIntervalTimeout=MAXDWORD` is set. `wineshim.c` patches the export
-   table entry of `kernel32!CreateFileW` in the harness process before the DLL
-   loads and sets those timeouts on any handle opened on the device path. No
-   instruction patching; inert on real Windows.
-4. **The simulator had to speak the DLL's dialect.** The DLL numbers its
-   commands and waits for the number to come back (below). The simulator did
-   not echo it, so the DLL reported "no devices available" after a perfectly
-   good `ari` reply. It does now.
+3. Read semantics. The DLL issues one overlapped `ReadFile` of 8191 bytes from
+   a reader thread and expects it to complete when a USB packet arrives. Wine
+   treats the pty as a serial port with zero `COMMTIMEOUTS`, so that read waits
+   for all 8191 bytes and the version reply never arrives (the DLL then sends
+   `tbi` three times and gives up, below). Wine completes an overlapped serial
+   read on the first byte, and never with zero bytes, when only
+   `ReadIntervalTimeout=MAXDWORD` is set. `wineshim.c` patches the export-table
+   entry of `kernel32!CreateFileW` in the harness process before the DLL loads
+   and sets those timeouts on any handle opened on the device path. No
+   instruction is patched, and the shim is inert on real Windows.
+4. The simulator had to speak the DLL's dialect. The DLL numbers its commands
+   and waits for the number to come back (below). The simulator did not echo
+   it, so the DLL reported "no devices available" after a correct `ari` reply.
+   It echoes it now.
 
-`container-run.sh` is the in-container half; `ab.sh` builds both harness
-binaries (the same `j2534_trace.c` compiled with `i686-w64-mingw32-gcc` and
-with `cc`), runs the container, runs the native side, and diffs.
+`container-run.sh` is the in-container half. `ab.sh` builds both harness
+binaries (the same `j2534_trace.c` compiled with `i686-w64-mingw32-gcc` and with
+`cc`), runs the container, runs the native side, and compares. The native side
+reaches the simulator or cable through its CDC-ACM node (`OPENPORT_DEVICE`),
+with `ptytap.py` recording the bytes.
 
 ## What the vendor DLL does on the wire
 
-Everything below was read off `vendor.tap`, build 1.02.0.4868, firmware
+Everything below was read off `vendor.tap`, DLL build 1.02.0.4868, firmware
 simulated as 1.17.4877. It is the vendor's behaviour under emulation, not a
-cable measurement; where it makes a claim about the *firmware*, the cable run
-of this harness is what confirms it.
+cable measurement; where it makes a claim about the firmware, the cable run of
+this harness is what confirms it.
 
-- **Every command carries a sequence number, and the DLL waits for its echo.**
+- Every command carries a sequence number, and the DLL waits for its echo:
   `ata 2`, `atr 16 3`, `ato6 0 500000 0 4`, `ats6 30 0 5`, `atf6 3 64 4 6`,
-  `att6 6 64 1000000 7`, `atk6 0 8`, `atc6 9`, `atz 10`. It starts at 2 after
-  `ati`, which is sent bare, preceded by `\r\n\r\n` to flush the line. The
-  reply it accepts is `aro <seq>`, `arr 16 12480 <seq>`, `arf6 0 <seq>` and so
-  on; the trailing field `PROTOCOL.md` §3 had seen as a constant 0 is this
-  echo, 0 because this driver sends no number. The DLL waits 500 ms for most
-  replies and 5 s for `READ_VBATT` and `GET_CONFIG`, then returns
-  `ERR_TIMEOUT`.
-- **A write with `Timeout=0` is sent without a sequence number** and the DLL
-  does not wait for `aro`: `att6 6 64 1000000` versus `att6 6 64 1000000 7`
-  for `Timeout=1000`. The fourth argument looked constant in the scenarios,
-  which always pass 1000 ms or 0; the replay of the reflash tool, which passes
-  5000 ms for its driver-window transfer, sent `5000000`. It is the caller's
+  `att6 6 64 1000000 7`, `atk6 0 8`, `atc6 9`, `atz 10`. Numbering starts at 2
+  after `ati`, which is sent bare, preceded by `\r\n\r\n` to flush the line.
+  The reply it accepts is `aro <seq>`, `arr 16 12480 <seq>`, `arf6 0 <seq>`
+  and so on. The trailing field `PROTOCOL.md` §3 had seen as a constant 0 is
+  this echo; it read 0 because this driver then sent no number. The DLL waits
+  500 ms for most replies and 5 s for `READ_VBATT` and `GET_CONFIG`, then
+  returns `ERR_TIMEOUT`.
+- A write with `Timeout=0` is sent without a sequence number, and the DLL does
+  not wait for `aro`: `att6 6 64 1000000` against `att6 6 64 1000000 7` for
+  `Timeout=1000`. The fourth argument looked constant in the scenarios, which
+  always pass 1000 ms or 0; the replay of a reflash tool, which passes 5000 ms
+  for its driver-window transfer, sent `5000000`. It is the caller's
   `WriteMsgs` Timeout in microseconds, with 1 000 000 substituted for 0: the
-  firmware's budget for getting the message onto the bus; without it the
+  firmware's budget for getting the message onto the bus. Without it the
   firmware's ~1 s default would cut a 257-byte transfer paced by a slow ECU
   short of the 5 s the tool allowed. This driver sends the same argument. On
-  the cable an unnumbered `att` gets **no reply at all**, not
-  even `are 9` when the bus never acknowledges, and while the firmware is
-  still trying to send, the next command (`atc6`) is not answered for about
-  a second, which is the DLL's `PassThruDisconnect` returning `ERR_TIMEOUT`
-  right after. The numbered form on a dead bus answers `are 9 <seq>` after
-  1.0 s. J2534 says `Timeout=0` means queue and return; the vendor does that
-  (`rc=0`, one message sent). So does this driver, with one difference: its
-  write goes out numbered and unwaited, so the late reply is recognised and
-  dropped instead of being mistaken for the next command's answer.
-- **`CLEAR_RX_BUFFER` touches the wire not at all** in the vendor DLL: it
-  clears the DLL's own receive queue. This driver does the same. `atl<ch>`
-  is `CLEAR_PERIODIC_MSGS` in both (parameter sweep, below).
-- **`atm` is the firmware's periodic message.** `PassThruStartPeriodicMsg`
-  (100 ms) sends `atm6 100000 0 64 6 <seq>` + payload: interval in
-  microseconds, a 0, TxFlags, length, sequence. `PassThruStopPeriodicMsg` sends
+  the cable an unnumbered `att` gets no reply at all, not even `are 9` when the
+  bus never acknowledges, and while the firmware is still trying to send, the
+  next command (`atc6`) is not answered for about a second; the DLL's
+  `PassThruDisconnect` right after returns `ERR_TIMEOUT`. The numbered form on
+  a dead bus answers `are 9 <seq>` after 1.0 s. J2534 says `Timeout=0` means
+  queue and return; the vendor does that (`rc=0`, one message sent). So does
+  this driver, with one difference: its write goes out numbered and unwaited,
+  so the late reply is recognised and dropped instead of being mistaken for the
+  next command's answer.
+- `CLEAR_RX_BUFFER` does not touch the wire in the vendor DLL: it clears the
+  DLL's own receive queue. This driver does the same. `atl<ch>` is
+  `CLEAR_PERIODIC_MSGS` in both (parameter sweep, below).
+- `atm` is the firmware's periodic message. `PassThruStartPeriodicMsg` (100 ms)
+  sends `atm6 100000 0 64 6 <seq>` plus the payload: interval in microseconds,
+  a 0, TxFlags, length, sequence. `PassThruStopPeriodicMsg` sends
   `atn6 <id> <seq>`. On the cable `atm` answers `arm6 0 <seq>`, then
   `arm6 1 <seq>`, and the facility was measured against a bench ECU
   (`PROTOCOL.md` §10). This driver sends the same commands.
-- **`SetProgrammingVoltage(pin, VOLTAGE_OFF)` is sent as `atv 12 -1`**, the
-  value printed signed. This driver sends it the same way; the firmware
-  accepts both forms.
-- **Open is `ati`, `ata`; close is `atz`.** `PassThruReadVersion` answers from
-  the `ati` reply cached at open and touches the wire not at all.
-  `READ_VBATT` is `atr 16 <seq>`.
-- **If `ati` gets no reply the DLL sends `tbi\n`** (LF only, no CR) three
-  times 300 ms apart on a second handle, reading up to 256 bytes each time,
-  then reports `ERR_DEVICE_NOT_CONNECTED`. No reply shape this project can
-  guess satisfies it; a bootloader query is the likely reading, and the cable
-  run answers it.
-- **Long replies repeat the CAN id in every chunk.** Fed a 600-byte ISO15765
-  reply chunked with the id only in the first frame, the DLL delivered 598
-  bytes; fed the same reply with the id at the start of every continuation
-  chunk, it delivered all 606 bytes intact. Tactrix's own consumer reads the
-  firmware as `id_every_chunk`, which is the simulator's default. This
-  driver strips the id from every continuation chunk, as the DLL does.
-- **Multi-frame delivery shape matches.** Both drivers hand the application a
-  4-byte `ISO15765_FIRST_FRAME` indication and then one complete message,
-  which is what J2534 Table 72 asks for.
-
-- **Five-baud init is `atw<ch> <address>`**, the address in decimal on the
-  command line and nothing after it (`atw3 51` for 0x33). The form an earlier
-  reading had, `atw3 1` plus the address as a raw byte, makes the firmware
-  initialise address 1 and then misread the byte as the next command, which
-  wedges the following disconnect. This driver sends the vendor's form. The
-  vendor also opens ISO9141 with a trailing value that varies from run to run
-  (3 on the bench, 5 on the car: the DLL's handle of the ISO14230 channel it
-  had just closed), which is its own bookkeeping and not copied.
-- **On the Audi (2009 1.9 TDI, EDC16), both drivers fail every K-line init
-  identically**: fast init to 0x33 and 0x01, five-baud to 0x33, 0x01, 0x10,
-  0x17, 0x19, 0x25, 0x08 and 0x46, all `ERR_FAILED` from both, and again
-  after re-seating the OBD plug. The line is electrically present: a fast
-  init takes 126–132 ms on the car for either driver (the wake-up pulse, the
-  request and the wait) against 78 ms on the bench with nothing on pin 7.
-  The driver is not the reason. The open-source EDC16 K-line flasher
-  (`fjvva/ecu-tool`, which reads and writes EDC16U31/34 over pin 7) does a
-  5-baud init to **0x01**, the keyword handshake, then StartCommunication
-  `81 10 F1 81` to **0x10** expecting `83 F1 10 C1 EF 8F`, and retries the
-  5-baud init up to six times because the ECU often ignores the first ones.
-  Replicating that from the cable (eight 5-baud attempts at 0x01 on both
-  K-line channels, W1 raised to 1000 ms, 9600 and 10400 baud, six fast inits
-  to 0x10) produced no sync byte at all. No module answered a 5-baud init at
-  any of eight VAG addresses either. Either OBD pin 7 on this car is not on
-  a live K-line (the Galletto may have been used at the ECU connector or in
-  boot mode), or the cable's 5-baud waveform is not what this ECU accepts;
-  a multimeter on pin 7 (12 V idle means a pulled-up K-line is present) and
-  a bit-banged init from an FTDI cable would tell the two apart.
-- **On the Audi's CAN, both drivers delivered the identical raw frames**: the
-  `$01 00` request echoed on 0x7DF and the engine's reply on 0x7E8
-  (`06 41 00 98 3b 80 19`), same status bits, same sizes. The transmit-done
-  indication has the same shape too: a 4-byte message carrying the CAN id,
-  as J2534-1 §8.6 specifies.
-- **A running periodic message is silent in the vendor DLL**: `atm` on the
-  live bus produced no transmit-indication frames at all in 550 ms, and the
-  application read nothing. This driver uses `atm` and sees the same.
+- `SetProgrammingVoltage(pin, VOLTAGE_OFF)` is sent as `atv 12 -1`, the value
+  printed signed. This driver sends it the same way; the firmware accepts both
+  forms.
+- Open is `ati`, `ata`; close is `atz`. `PassThruReadVersion` answers from the
+  `ati` reply cached at open and does not touch the wire. `READ_VBATT` is
+  `atr 16 <seq>`.
+- If `ati` gets no reply, the DLL sends `tbi\n` (LF only, no CR) three times
+  300 ms apart on a second handle, reading up to 256 bytes each time, then
+  reports `ERR_DEVICE_NOT_CONNECTED`. No reply shape this project could guess
+  satisfies it, and the cable does not answer `tbi` with either line ending
+  (below); a bootloader query is the likely reading.
+- Long replies repeat the CAN id in every chunk. Fed a 600-byte ISO15765 reply
+  chunked with the id only in the first frame, the DLL delivered 598 bytes; fed
+  the same reply with the id at the start of every continuation chunk, it
+  delivered all 606 bytes intact. Tactrix's own consumer therefore reads the
+  firmware as `id_every_chunk`, which is the simulator's default and what the
+  cable does (`PROTOCOL.md` §7.6). This driver strips the id from every
+  continuation chunk, as the DLL does.
+- Multi-frame delivery has the same shape. Both drivers hand the application a
+  4-byte `ISO15765_FIRST_FRAME` indication and then one complete message, which
+  is what J2534 Table 72 asks for.
+- Five-baud init is `atw<ch> <address>`, the address in decimal on the command
+  line and nothing after it (`atw3 51` for 0x33). The form an earlier reading
+  had, `atw3 1` plus the address as a raw byte, makes the firmware initialise
+  address 1 and then misread the byte as the next command, which wedges the
+  following disconnect. This driver sends the vendor's form. The vendor also
+  opens ISO9141 with a trailing value that varies from run to run (3 on the
+  bench, 5 on the car: the DLL's handle of the ISO14230 channel it had just
+  closed); that is its own bookkeeping and is not copied.
+- On the Audi (2009 1.9 TDI, EDC16), both drivers fail every K-line init
+  identically: fast init to 0x33 and 0x01, five-baud to 0x33, 0x01, 0x10, 0x17,
+  0x19, 0x25, 0x08 and 0x46, all `ERR_FAILED` from both, and again after
+  re-seating the OBD plug. The line is electrically present: a fast init takes
+  126–132 ms on the car for either driver (the wake-up pulse, the request and
+  the wait) against 78 ms on the bench with nothing on pin 7. The driver is not
+  the reason. The open-source EDC16 K-line flasher `fjvva/ecu-tool`, which
+  reads and writes EDC16U31/34 over pin 7, does a five-baud init to 0x01, the
+  keyword handshake, then StartCommunication `81 10 F1 81` to 0x10 expecting
+  `83 F1 10 C1 EF 8F`, and retries the five-baud init up to six times because
+  the ECU often ignores the first ones. Replicating that from the cable (eight
+  five-baud attempts at 0x01 on both K-line channels, W1 raised to 1000 ms,
+  9600 and 10400 baud, six fast inits to 0x10) produced no sync byte at all.
+  No module answered a five-baud init at any of eight VAG addresses either.
+  Either OBD pin 7 on this car is not on a live K-line (the Galletto may have
+  been used at the ECU connector or in boot mode), or the cable's five-baud
+  waveform is not what this ECU accepts. A multimeter on pin 7 (12 V idle means
+  a pulled-up K-line is present) and a bit-banged init from an FTDI cable would
+  tell the two apart.
+- On the Audi's CAN, both drivers delivered identical raw frames: the `$01 00`
+  request echoed on 0x7DF and the engine's reply on 0x7E8
+  (`06 41 00 98 3b 80 19`), with the same status bits and sizes. The
+  transmit-done indication has the same shape too: a 4-byte message carrying
+  the CAN id, as J2534-1 §8.6 specifies.
+- A running periodic message is silent in the vendor DLL: `atm` on the live bus
+  produced no transmit-indication frames at all in 550 ms, and the application
+  read nothing. This driver uses `atm` and sees the same.
 
 ## API semantics where the two disagree
 
 From the `errors` scenario. This driver follows the standard where it can
-justify it; the vendor is the de-facto reference an application was tested
-against. Both are listed so a decision is a decision and not an accident.
+justify it; the vendor is the de facto reference an application was tested
+against. Both are listed so that each difference is a recorded decision. The
+parameter sweep below adds more.
 
 | Call | Vendor | This driver |
 |---|---|---|
@@ -188,58 +213,55 @@ against. Both are listed so a decision is a decision and not an accident.
 
 The last five are from cable replays on 2026-09-16 (`PROTOCOL.md` §5, §8).
 Every J2534-2 channel id, `TX_PARAM_STOP_BITS`, `FAST_INIT` on the L line and
-`SNIFF_MODE` produce the same commands from both drivers. Of the rest:
-grounding K under a K-line channel ends its communication, and neither the
-firmware nor the vendor DLL objects. With a pin in `pInput`, both drivers send
-`atr <pin>` and agree.
+`SNIFF_MODE` produce the same commands from both drivers. Grounding K under a
+K-line channel ends its communication, and neither the firmware nor the vendor
+DLL objects. With a pin in `pInput`, both drivers send `atr <pin>` and agree.
 
-Everything else in the `errors` sequence, including every timeout code, every
-`ERR_CHANNEL_IN_USE`, `ERR_INVALID_FILTER_ID`, `ERR_INVALID_MSG_ID` and
-`ERR_NOT_SUPPORTED`, agrees.
+Everything else in the `errors` sequence agrees, including every timeout code,
+every `ERR_CHANNEL_IN_USE`, `ERR_INVALID_FILTER_ID`, `ERR_INVALID_MSG_ID` and
+`ERR_NOT_SUPPORTED`.
 
 ## Timing, and what it can and cannot say
 
 The vendor side runs interpreted. Its CPU-bound work is tens of times slower
 than native, so a per-call latency comparison is meaningless in absolute terms.
-What the vendor numbers *are* good for is the waits the DLL chooses, which are
-wall-clock and unaffected: the 500 ms and 5 s reply timeouts, the 300 ms
-`tbi` retry, the ~6 ms polling granularity of `ReadMsgs`, and its
-`ReadMsgs(100)` / `ReadMsgs(500)` returning at 107 / 508 ms against this
-driver's 99.5 / 501 ms.
+The vendor numbers are good for the waits the DLL chooses, which are wall-clock
+and unaffected: the 500 ms and 5 s reply timeouts, the 300 ms `tbi` retry, the
+~6 ms polling granularity of `ReadMsgs`, and its `ReadMsgs(100)` /
+`ReadMsgs(500)` returning at 107 / 508 ms against this driver's 99.5 / 501 ms.
 
-Our own numbers are native: `PassThruOpen` takes about 2 ms and
-`PassThruClose` about 11 ms against the vendor's 24 and 6 ms for the same
-wire work. An earlier open that drained and settled the pipe against stale
-replies took 92 ms; numbering commands the way the vendor does made the
-drain unnecessary.
+This driver's numbers are native: `PassThruOpen` takes about 2 ms and
+`PassThruClose` about 11 ms, against the vendor's 24 and 6 ms for the same wire
+work. An earlier open that drained and settled the pipe against stale replies
+took 92 ms; numbering commands as the vendor does made the drain unnecessary.
 
-`bench` runs N write/read cycles and records each; `ab_diff.py` prints
-medians. With the cable attached both sides see real USB latency, and the
-vendor's emulation overhead sits on top of it, so treat vendor cable timings
-as upper bounds.
+`bench` runs N write/read cycles and records each; `ab_diff.py` prints medians.
+With the cable attached both sides see real USB latency, and the vendor's
+emulation overhead sits on top of it, so treat vendor cable timings as upper
+bounds.
 
 ## Running against the cable
 
 The image bakes `iface.reg` into its Wine registry. An image built from an
 older `iface.reg` (before the public release it carried the bench cable's own
 serial) registers a device the container never links, and the vendor DLL
-answers "no devices available" without sending a byte. `ab.sh` labels the
-image with a hash of `Dockerfile` and `iface.reg` and rebuilds it when they
-change.
+answers "no devices available" without sending a byte. `ab.sh` labels the image
+with a hash of `Dockerfile` and `iface.reg` and rebuilds it when they change.
 
 `ab.sh --cable /dev/cu.usbmodemXXXX` serves the tty on `127.0.0.1:5455` with
-`ttybridge.py`, the container reaches it as `host.docker.internal:5455` and
-turns it back into a pty; the vendor DLL then drives the real cable. Our side
-runs natively on the same device afterwards. No ECU is needed for the
-firmware questions; transmits fail with `ERR_TIMEOUT` on both sides for want
-of an ACK peer, as on any one-cable bench.
+`ttybridge.py`; the container reaches it as `host.docker.internal:5455` and
+turns it back into a pty, and the vendor DLL then drives the real cable. This
+driver runs natively on the same device afterwards. No ECU is needed for the
+firmware questions; transmits fail with `ERR_TIMEOUT` on both sides for want of
+an ACK peer, as on any one-cable bench.
 
 Measured on the bench, 2026-09-13, firmware 1.17.4877: the sequence number is
-echoed on every reply (`arr 16 108 3`, `arf6 0 8`, `arg6 30 0 10`,
-`are 1 9`); `atm` answers `arm6 <id> <seq>` and `atn` stops it; `tbi` gets
-no reply with either line ending; `atv 12 -1` is accepted. All four are in
-`PROTOCOL.md` and modelled in the simulator. Still open: the chunk layout of
-a >250-byte reply on the wire, which needs an ECU that sends one.
+echoed on every reply (`arr 16 108 3`, `arf6 0 8`, `arg6 30 0 10`, `are 1 9`);
+`atm` answers `arm6 <id> <seq>` and `atn` stops it; `tbi` gets no reply with
+either line ending; `atv 12 -1` is accepted. All four are in `PROTOCOL.md` and
+modelled in the simulator. The chunk layout of a long reply, open at the time,
+was measured against the bench ECU on 2026-09-24: 70-byte chunks with the CAN
+id on each (`PROTOCOL.md` §7.6).
 
 ## Parameter sweep
 
@@ -247,84 +269,97 @@ Every finding above came from one parameter translated differently, and the
 scenarios pass only the parameters a typical session uses. The `sweep`
 scenarios pass each of the rest once: connect flags and rates, all J2534
 protocol ids, every configuration parameter on four channels (read, set to its
-J2534-1 default, read back), filter shapes and flags, transmit flags and
-sizes, periodic limits, list and K-line init variants.
+J2534-1 default, read back), filter shapes and flags, transmit flags and sizes,
+periodic limits, list and K-line init variants.
+
+Against the simulator:
 
 ```bash
-make ab-official AB_ARGS="-- sweep"                                    # simulator
-make ab-official-cable CABLE=/dev/cu.usbmodemXXXX AB_ARGS="-- sweep"  # bench cable
-make ab-official-cable CABLE=/dev/cu.usbmodemXXXX AB_ARGS="-- edge"   # then, on its own
+make ab-official AB_DLL=/path/to/op20pt32.dll AB_ARGS="-- sweep"
+```
+
+Against the bench cable:
+
+```bash
+make ab-official-cable AB_DLL=/path/to/op20pt32.dll CABLE=/dev/cu.usbmodemXXXX AB_ARGS="-- sweep"
+```
+
+Then, on its own:
+
+```bash
+make ab-official-cable AB_DLL=/path/to/op20pt32.dll CABLE=/dev/cu.usbmodemXXXX AB_ARGS="-- edge"
 ```
 
 The sweep passes only values J2534 allows. Values it does not allow are a
 separate scenario, `edge`: CAN at rate 0, filter types 0 and 4, an eleventh
 filter, CAN frames of 0, 3 and 13 bytes, ISO15765 frames of 3 and 4100 bytes
-(and 4 with extended addressing), periodics every 4 ms and 65 536 s or 3
-bytes long, and a 260-byte K-line frame. This driver refuses most of them
-before the wire; the vendor DLL forwards all of them, so against the cable
-they are firmware input never tried before. None writes flash or switches a
-voltage, so the realistic worst case is a firmware that stops answering until
-it is unplugged. Run `edge` on its own and last, with nothing on the OBD
-connector: if the cable wedges, the tap's final command names the culprit,
-and no further `PassThruOpen` follows. The vendor's reopen of a silent cable
-sends `tbi`, a bootloader query whose answered path has never been seen. On
+(and 4 with extended addressing), periodics every 4 ms and every 65 536 ms or 3
+bytes long, and a 260-byte K-line frame. This driver refuses most of them before
+the wire; the vendor DLL forwards all of them, so against the cable they are
+firmware input never tried before. None writes flash or switches a voltage, so
+the realistic worst case is a firmware that stops answering until it is
+unplugged. **Run `edge` on its own and last, with nothing on the OBD
+connector.** If the cable wedges, the tap's final command names the culprit, and
+no further `PassThruOpen` follows: the vendor's reopen of a silent cable sends
+`tbi`, a bootloader query whose answered path has never been seen. On
 2026-09-24 the cable answered every `edge` command and kept working.
 
 Each step is preceded by a marker call, `READ_PROG_VOLTAGE` with pin 17 in
 `pInput`, which both drivers send as `atr 17`. `ab_diff.py` cuts each wire
 capture at the markers and compares the commands of every step, payloads
-included (report section 2c). Transmits get a 100 ms budget so a bench cable
-fails them quickly. They carry only read-only requests (`$22`, `$3E`, OBD
+included (report section 2c). Transmits get a 100 ms budget so that a bench
+cable fails them quickly. They carry only read-only requests (`$22`, `$3E`, OBD
 mode 1), so a run with the cable on a car changes nothing in the car.
 
-Results, DLL 1.02.0.4868, firmware 1.17.4877, 2026-09-24. Against the bench
-cable (12 V on pin 16, nothing else on the connector), after the changes
-below: the sweep's 670 steps, 648 identical on the wire, 22 not; `edge`'s 35
-steps, 23 identical. The cable answered every command of both and closed
-normally.
-Against the simulator the counts differ slightly, because the simulator
-acknowledges transmits that the bench cannot. The drivers agree on:
+Results, DLL 1.02.0.4868, firmware 1.17.4877, 2026-09-24, against the bench
+cable (12 V on pin 16, nothing else on the connector), after the changes below:
+of the sweep's 670 steps, 648 were identical on the wire and 22 were not; of
+`edge`'s 35 steps, 23 were identical. The cable answered every command of both
+and closed normally. Against the simulator the counts differ slightly, because
+the simulator acknowledges transmits that the bench cannot. The drivers agree
+on:
 
-- **Every configuration parameter** on ISO15765, CAN, ISO14230 and ISO9141
-  goes out as the same `atg`/`ats` with the same value. The vendor converts no
-  units: `P1_MAX` 40 is `ats4 7 40` from both drivers.
-- Every connect flag and rate both drivers accept, every J2534-2 channel id,
-  and every transmit flag (29-bit, extended addressing, `FRAME_PAD`,
+- Every configuration parameter on ISO15765, CAN, ISO14230 and ISO9141 goes out
+  as the same `atg`/`ats` with the same value. The vendor converts no units:
+  `P1_MAX` 40 is `ats4 7 40` from both drivers.
+- Every connect flag and rate both drivers accept, every J2534-2 channel id, and
+  every transmit flag (29-bit, extended addressing, `FRAME_PAD`,
   `SW_CAN_HV_TX`, `WAIT_P3_MIN_ONLY`) produce the same commands.
-- The 4099-byte ISO15765 transmit, 29-bit and extended-addressing
-  flow-control filters, and K-line filters produce the same commands.
+- The 4099-byte ISO15765 transmit, 29-bit and extended-addressing flow-control
+  filters, and K-line filters produce the same commands.
 - `CLEAR_MSG_FILTERS` and `CLEAR_PERIODIC_MSGS`, since the fix below.
-- `GET_CONFIG`/`SET_CONFIG` lists: the vendor sends every parameter and
-  returns the status of the last one (`[3, 127]` gives `ERR_NOT_SUPPORTED`,
-  `[127, 3]` gives 0). This driver stopped at the first failure, leaving the
-  rest unset and failing lists the vendor completes; it now does the same.
-- A flow-control message given with a PASS or BLOCK filter is ignored by both
-  (J2534-1 §7.2.9.2 calls it an error; refusing it failed applications that
-  pass a zeroed message rather than NULL).
+- `GET_CONFIG`/`SET_CONFIG` lists: the vendor sends every parameter and returns
+  the status of the last one (`[3, 127]` gives `ERR_NOT_SUPPORTED`, `[127, 3]`
+  gives 0). This driver used to stop at the first failure, leaving the rest
+  unset and failing lists the vendor completes; it now does the same as the
+  vendor.
+- A flow-control message given with a PASS or BLOCK filter is ignored by both.
+  J2534-1 §7.2.9.2 calls it an error, but refusing it would fail an application
+  that passes a zeroed message rather than NULL.
 - Periodic intervals outside J2534's 5–65535 ms go to the firmware from both;
-  the cable runs 4 ms and 65 536 s.
+  the cable accepts 4 ms and 65 536 ms.
 - The loopback echo of a raw CAN frame is delivered identically (simulator).
 
-**Fixed: filters survived `CLEAR_MSG_FILTERS`.** This driver sent `atk` for
-each filter id it had recorded, in a 32-bit mask at bit `id & 31`. The cable
-never reuses a filter id within a session: ids count up across every channel
-and restart only at `ata`/`atz`. So filter 32 shared filter 0's bit, and once
-filter 32 was stopped, `CLEAR_MSG_FILTERS` sent nothing, returned success and
-left filter 0 installed. Reproduced on the cable with 33 filter starts. The
-vendor sends one `atk<ch> -1`, which the cable answers `aro` and after which
-every old id answers `are 22`; for `CLEAR_PERIODIC_MSGS` it sends one
-`atl<ch>`, after which every old periodic id answers `are 13`. This driver now
-sends the same two commands, and keeps no filter table.
+Fixed: filters survived `CLEAR_MSG_FILTERS`. This driver sent `atk` for each
+filter id it had recorded, in a 32-bit mask at bit `id & 31`. The cable never
+reuses a filter id within a session: ids count up across every channel and
+restart only at `ata`/`atz`. So filter 32 shared filter 0's bit, and once filter
+32 was stopped, `CLEAR_MSG_FILTERS` sent nothing, returned success and left
+filter 0 installed. Reproduced on the cable with 33 filter starts. The vendor
+sends one `atk<ch> -1`, which the cable answers `aro` and after which every old
+id answers `are 22`; for `CLEAR_PERIODIC_MSGS` it sends one `atl<ch>`, after
+which every old periodic id answers `are 13`. This driver now sends the same two
+commands and keeps no filter table.
 
 They still differ here:
 
 | Case | Vendor | This driver |
 |---|---|---|
-| `GET_CONFIG` or `SET_CONFIG` with `pInput` NULL | **process dies** (read fault at address 0) | `ERR_NULL_PARAMETER` |
-| `FAST_INIT` with `pInput` NULL (J2534: wake-up pattern only) | **process dies** (write fault at 0x11) | `aty<ch> 0 0` |
+| `GET_CONFIG` or `SET_CONFIG` with `pInput` NULL | the process dies (read fault at address 0) | `ERR_NULL_PARAMETER` |
+| `FAST_INIT` with `pInput` NULL (J2534: wake-up pattern only) | the process dies (write fault at 0x11) | `aty<ch> 0 0` |
 | A transmit the firmware times out (`are 9`, no ACK peer) | `ERR_TIMEOUT`, `NumMsgs` left as the caller set it: 3 for a three-message write that sent one `att` | `ERR_TIMEOUT` with `NumMsgs` 0, the number sent (J2534-1) |
 | Flow-control filter whose FC message has different TxFlags from mask and pattern | `ERR_FAILED`, nothing sent | installs it with the FC message's flags |
-| Message ProtocolID differs from the channel's | chooses the firmware channel by the message's ProtocolID: CAN on an ISO15765 channel goes out as `att5`; ISO15765 on a CAN channel returns `ERR_INVALID_PROTOCOL_ID` | sends on the channel it was given |
+| Message `ProtocolID` differs from the channel's | chooses the firmware channel by the message's `ProtocolID`: CAN on an ISO15765 channel goes out as `att5`; ISO15765 on a CAN channel returns `ERR_INVALID_PROTOCOL_ID` | sends on the channel it was given |
 | `CLEAR_FUNCT_MSG_LOOKUP_TABLE` | 0, nothing sent | `ERR_NOT_SUPPORTED` |
 | `edge`: connect at rate 0; ISO15765 write of 4100 bytes; a 3-byte CAN periodic | sent; the cable accepts all three (`aro`; the 4100-byte frame is attempted and times out; `arm`, and the malformed frame repeats) | refused before the wire (`ERR_INVALID_BAUDRATE`, `ERR_INVALID_MSG`): the firmware would act on them wrongly and the application could not tell |
 | `edge`: CAN writes of 0, 3 or 13 bytes; ISO15765 writes of 3 bytes, or 4 with extended addressing | sent; the cable answers `are 10` | refused before the wire; same return code |
@@ -334,82 +369,86 @@ They still differ here:
 | `FIVE_BAUD_INIT` answered with a bare `aro` (the simulator's modelled reply) | 0 | `ERR_INIT_FAILED`: no key bytes means no init |
 
 The remaining wire differences follow from these. The firmware numbers filters
-and periodic messages in sequence, so one extra on one side shifts the ids
-every later `atk`/`atn` names; periodic ids keep counting across sessions
-while the cable is powered. Multi-message transmit budgets differ only by
-elapsed time. The sweep skips the three cases that crash the vendor DLL.
+and periodic messages in sequence, so one extra on one side shifts the ids every
+later `atk`/`atn` names; periodic ids keep counting across sessions while the
+cable is powered. Multi-message transmit budgets differ only by elapsed time.
+The sweep skips the three cases that crash the vendor DLL.
 
 ## Against a live ECU
 
-The bench ECU of `PROTOCOL.md` §10 gives what the one-cable bench lacks: an
+The bench ECU of `PROTOCOL.md` §10 provides what the one-cable bench lacks: an
 acknowledging peer, real replies and a real bus. A replay (below) drove both
-drivers through the same read-only sequence against it, 2026-09-24, 12.1 V on
-pin 16 checked before and after: 300 ms of the module's own broadcast on a raw
-CAN channel; four session-less identification and status reads on ISO15765
-(12 to 22 bytes, all segmented); one read with `LOOPBACK` on; a firmware
-periodic TesterPresent for 3 s. The requests are the module's own read-only
-identification set; the probe files live with that module's tooling.
+drivers through the same read-only sequence against it on 2026-09-24, with
+12.1 V on pin 16 checked before and after: 300 ms of the module's own broadcast
+on a raw CAN channel; four session-less identification and status reads on
+ISO15765 (12 to 22 bytes, all segmented); one read with `LOOPBACK` on; and a
+firmware periodic TesterPresent for 3 s. The requests are the module's own
+read-only identification set; the probe files live with that module's tooling.
 
 Both drivers put identical commands on the wire and delivered every reply
-identically: the TxDone indication with the CAN id, the first-frame
-indication, the reassembled message, byte for byte, the same `RxStatus` and
+identically: the TxDone indication with the CAN id, the first-frame indication,
+and the reassembled message, byte for byte, with the same `RxStatus` and
 `ExtraDataIndex`. One difference, now fixed: with `LOOPBACK` on, the firmware
 reports the ISO15765 echoes on raw CAN channel 5 (`PROTOCOL.md` §7.7), the
 vendor delivers them to the ISO15765 channel, and this driver dropped them
 because channel 5 was not open. A tool that turns loopback on to watch its own
 requests saw nothing. It now gets the same two messages as from the vendor.
-Our copies arrive in wire order; the vendor puts the TxDone first, and the
-timestamps show which is the order they happened in.
+This driver's copies arrive in wire order; the vendor puts the TxDone first.
+The timestamps show the order in which they happened.
 
-Multi-frame transmit, the path a reflash depends on and the one no earlier
-test reached on real hardware: requests of 10, 20 and 100 bytes (a first frame
-and up to 14 consecutive frames) that the module's firmware reads in full and
-then refuses on length, which its binary says it does for any request of that
+Multi-frame transmit, the path a reflash depends on and one no earlier test
+reached on real hardware: requests of 10, 20 and 100 bytes (a first frame and up
+to 14 consecutive frames) that the module's firmware reads in full and then
+refuses on length, which its binary says it does for any request of that
 service longer than two bytes. The module's flow control asked for no block
-limit and no separation time. Both drivers put the same 190 payload bytes on
-the wire in the same commands, every request got its negative response, and a
+limit and no separation time. Both drivers put the same 190 payload bytes on the
+wire in the same commands, every request got its negative response, and a
 status read before and after returned the same bytes.
 
 With a raw CAN channel open beside the ISO15765 one, the vendor delivers every
 channel-5 frame, the echoes and the ordinary copies its filter passed, to the
-ISO15765 channel and none to the CAN channel. This driver keeps channel-5
-frames on the CAN channel.
+ISO15765 channel and none to the CAN channel. This driver keeps channel-5 frames
+on the CAN channel.
 
 ## Replaying a real application through both drivers
 
-The scenarios above are this project's own idea of what an application does.
-A recording is the application itself. `OPENPORT_RECORD=<file>` makes the
-driver append one line per entry-point call with every input and the id each
-call handed back; `j2534_trace --replay` executes that file against any
-J2534 library, mapping the recorded ids onto the ones the library under test
-returns. `ab.sh --replay` runs one recording through the vendor DLL and
-through `libj2534.dylib` against identical simulators and compares the wire
-byte for byte, command by command, payloads included, with only the
-open/close handshake (`ati`/`ata`/`atz`, known to differ) set aside.
+The scenarios above are this project's idea of what an application does. A
+recording is the application itself. `OPENPORT_RECORD=<file>` makes the driver
+append one line per entry-point call, with every input and the id each call
+handed back. `j2534_trace --replay` executes that file against any J2534
+library, mapping the recorded ids onto the ones the library under test returns.
+`ab.sh --replay` runs one recording through the vendor DLL and through
+`libj2534.dylib` against identical simulators and compares the wire byte for
+byte, command by command, payloads included, with only the open/close handshake
+(`ati`/`ata`/`atz`, known to differ) set aside.
 
-A recording is plain text, one call per line, so a probe can also be written
-by hand. `ioctl <dev> 14 <pin>` passes the pin through `pInput` to
+A recording is plain text, one call per line, so a probe can also be written by
+hand. `ioctl <dev> 14 <pin>` passes the pin through `pInput` to
 `READ_PROG_VOLTAGE`, which is how the vendor DLL was shown to take it
 (`PROTOCOL.md` §8).
 
+Record an application against the simulator:
+
 ```bash
-tools/ab-official/record.sh out/app.rec \
-    --sim-args "--ecu-model model.py:Ecu:image.bin" -- \
-    python3 my_tool.py --lib libj2534.dylib
-tools/ab-official/ab.sh --replay out/app.rec --sim-args "--ecu-model model.py:Ecu:image.bin"
+tools/ab-official/record.sh out/app.rec --sim-args "--ecu-model model.py:Ecu:image.bin" -- python3 my_tool.py --lib libj2534.dylib
+```
+
+Replay the recording through both drivers:
+
+```bash
+AB_DLL=/path/to/op20pt32.dll tools/ab-official/ab.sh --replay out/app.rec --sim-args "--ecu-model model.py:Ecu:image.bin"
 ```
 
 `--ecu-model FILE.py:CLASS[:IMAGE]` installs a scripted ECU behind the
-simulator: `CLASS(image_bytes_or_None, log=...)` is called once and the
-instance answers each request (`request_bytes -> response_bytes | None`).
-That is how a reflash tool's write path — programming session, seed/key,
-driver upload, erase, page transfers, read-back verify — is rehearsed end to
-end against a model of the target bootloader, which no car allows. The model
-for a given ECU lives with that ECU's tooling, not here.
+simulator: `CLASS(image_bytes_or_None, log=...)` is called once, and the
+instance answers each request (`request_bytes -> response_bytes | None`). That
+is how a reflash tool's write path (programming session, seed/key, driver
+upload, erase, page transfers, read-back verify) is rehearsed end to end against
+a model of the target bootloader, which no car allows. The model for a given ECU
+lives with that ECU's tooling, not here.
 
 Rehearsed this way against a 512 KB bootloader model, a real reflash tool's
-recording was 21 497 calls: one session, 5 882 transmits
-(driver windows, 1 920 image pages, and every `$23` read of the verify) and
-15 605 reads. Replaying it through the vendor DLL is the strongest statement
-this harness can make about a flash: for the exact requests the tool will
-send, Tactrix's own driver and this one put the same bytes on the wire.
+recording was 21 497 calls: one session, 5 882 transmits (driver windows, 1 920
+image pages, and every `$23` read of the verify) and 15 605 reads. Replayed
+through the vendor DLL, it shows that for the exact requests the tool will send,
+Tactrix's driver and this one put the same bytes on the wire.

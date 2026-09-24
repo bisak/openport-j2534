@@ -6,8 +6,8 @@ established by observation: sweeping the cable, recording vehicles, and
 running Tactrix's own Windows DLL against the same cable
 ([`AB-OFFICIAL.md`](AB-OFFICIAL.md)).
 
-**Device:** OpenPort 2.0, firmware `1.17.4877`, on macOS 26.6 (Apple Silicon),
-libusb 1.0.29. Vendor DLL `op20pt32.dll` 1.02.0.4868.
+Device: OpenPort 2.0, firmware `1.17.4877`, on macOS 26.6 (Apple Silicon),
+libusb 1.0.29. Vendor DLL: `op20pt32.dll` 1.02.0.4868.
 
 Every claim carries a confidence marker:
 
@@ -19,9 +19,9 @@ Every claim carries a confidence marker:
 
 Bench measurements were made with the cable on USB power and repeated with
 11.9 V on pin 16; none changed. Anything that needs a live bus was measured on
-a 2012 VW Caddy (ISO15765 and raw CAN), a 2009 Audi 1.9 TDI (raw CAN, a dead
-K-line) or a production chassis ECU on a bench harness (§10). Section 12 lists
-what is still open, and §13 the readings the cable refuted.
+a 2012 VW Caddy (ISO15765 and raw CAN), a 2009 Audi 1.9 TDI (raw CAN; no
+K-line responder) or a production chassis ECU on a bench harness (§10). Section
+12 lists what is still open, and §13 the readings the cable refuted.
 
 ---
 
@@ -39,8 +39,8 @@ bDeviceClass 0x02 (CDC communications)
     endpoint 0x82  bulk IN        64 bytes
 ```
 
-The device is a **standard CDC-ACM serial device**. `bInterfaceProtocol 0x01`
-is literally "AT commands", which is why every command begins `at`. There are
+The device is a standard CDC-ACM serial device. `bInterfaceProtocol 0x01` is
+"AT commands", which is why every command begins `at`. There are
 two ways to reach it:
 
 1. **libusb on the bulk pair**, what this driver does.
@@ -51,13 +51,13 @@ two ways to reach it:
 
 ### Claiming the interface on macOS **[V]**
 
-`AppleUSBCDCACM` binds **both** interfaces, and `libusb_kernel_driver_active`
+`AppleUSBCDCACM` binds both interfaces, and `libusb_kernel_driver_active`
 reports 1 for each:
 
 | Interface | `detach_kernel_driver` | `claim_interface` |
 |---|---|---|
 | 0 (comm) | `LIBUSB_ERROR_ACCESS` | `LIBUSB_ERROR_ACCESS` |
-| 1 (data) | `LIBUSB_ERROR_ACCESS` | **success** |
+| 1 (data) | `LIBUSB_ERROR_ACCESS` | success |
 
 So: claim the interface carrying the bulk pair, never interface 0, and treat a
 detach failure as expected rather than fatal. No `sudo`, no kext removal, no
@@ -81,7 +81,7 @@ them at close. Reported on Linux hardware (2026-09-21) and consistent with
 
 ## 2. Framing **[V]**
 
-Host to device: an **ASCII line terminated `\r\n`**, optionally followed
+Host to device: an ASCII line terminated `\r\n`, optionally followed
 immediately by raw binary payload bytes.
 
 ```
@@ -95,18 +95,18 @@ ar<verb> <args>\r\n                                    ASCII reply
 'a' 'r' <channel-digit> <len:u8> <payload...>          binary message frame
 ```
 
-**They interleave.** A message frame can arrive between a command and its
+They interleave: a message frame can arrive between a command and its
 reply, so a driver must demultiplex the stream rather than read a reply
 inline.
 
-**Telling them apart:** byte 2 is a *letter* for an ASCII reply and an *ASCII
-digit* for a binary frame. That is the whole discriminator, and it is
-unambiguous because the device accepts only single-digit channels. The length
-byte spans the full 0–255 range and must **not** be used to distinguish them.
+Byte 2 tells them apart: a letter for an ASCII reply, an ASCII digit for a
+binary frame. That is the whole discriminator, and it is unambiguous because
+the device accepts only single-digit channels. The length byte spans the full
+0–255 range and must not be used to distinguish them.
 
-An unrecognised command produces **no reply at all**: silence, not an error.
+An unrecognised command produces no reply at all: silence, not an error.
 
-**Spacing matters.** Channel-scoped verbs fuse the digit to the verb (`ato6
+Spacing matters. Channel-scoped verbs fuse the digit to the verb (`ato6
 …`, `atc6`); `atr`, `atv` and `atp` take a space before their first argument.
 `ato 6 …` is parsed differently and fails.
 
@@ -117,17 +117,17 @@ An unrecognised command produces **no reply at all**: silence, not an error.
 | Reply | Meaning |
 |---|---|
 | `aro` | success, no value |
-| `are <code>` | failure; `<code>` is a **J2534 error number** (§6) |
+| `are <code>` | failure; `<code>` is a J2534 error number (§6) |
 | `are <code> <detail>` | failure, echoing the offending value |
 | `ari <text>` | informational text (`ari main code version : 1.17.4877`) |
 | `arr <pin> <millivolts>` | pin voltage |
 | `arf<ch> <filter_id>` | filter installed |
 | `arg<ch> <param> <value>` | configuration value |
 | `arm<ch> <id>` | periodic message installed |
-| `arw<ch> <b> <b> …` | five-baud init result: the ECU's key bytes **in decimal on the line** **[P]**: third-party, measured with HDS on a 2005 Honda (`Aiden-korbs/openport2-winarm-j2534`); on this bench with no ECU the answer is `are 7` |
+| `arw<ch> <b> <b> …` | five-baud init result: the ECU's key bytes in decimal on the line **[P]**: third-party, measured with HDS on a 2005 Honda (`Aiden-korbs/openport2-winarm-j2534`); on this bench with no ECU the answer is `are 7` |
 | `ary<ch> <n>` + `n` raw bytes | fast init result: the StartCommunication response follows the line as raw bytes **[P]**: the `dschultzca` lineage's reading; the failure reply `are 7` is measured, a success has not been captured |
 
-**Every text reply echoes the number its command carried.** A command may end
+Every text reply echoes the number its command carried. A command may end
 with an extra decimal argument; the device appends it to the reply, and that
 is how Tactrix's DLL ties a reply to its command (`AB-OFFICIAL.md`). Measured
 2026-09-13: `ata 2` → `aro 2`, `atr 16 3` → `arr 16 108 3`, `atf6 3 64 4 8`
@@ -161,12 +161,12 @@ means the verb does not exist: `atb atd ate ath atj atq atu`.
 | `atk<ch>` | `<filter_id>` | remove a filter; `are 22` for an unknown id. `atk<ch> -1` removes every filter on the channel (`aro`, also with none installed; the old ids then answer `are 22`); it is the vendor DLL's `CLEAR_MSG_FILTERS` and this driver's. Filter ids are never reused within a session: they count up across all channels and restart at `ata`/`atz` (measured 2026-09-24) |
 | `atg<ch>` | `<param>` | read a configuration value (§8) |
 | `ats<ch>` | `<param> <value>` | write a configuration value |
-| `atm<ch>` | `<interval_us> 0 <txflags> <len>` + payload | **start a periodic message**; replies `arm<ch> <id>`; measured against a bench ECU (§10) |
+| `atm<ch>` | `<interval_us> 0 <txflags> <len>` + payload | start a periodic message; replies `arm<ch> <id>`; measured against a bench ECU (§10) |
 | `atn<ch>` | `<msg_id>` | stop a periodic message; `are 13` for an unknown id |
 | `atr` | ` <pin>` | read a pin voltage in millivolts (§8) |
 | `atv` | ` <pin> <millivolts>` | programming voltage or ground on a pin (§8) |
-| `aty<ch>` | `<len> 0` + request bytes | K-line **fast** init; returns in ~108 ms with a 25/25 ms wake pulse |
-| `atw<ch>` | `<address>` (decimal, no payload) | K-line **five-baud** init, `atw3 51` for 0x33, as the vendor DLL sends it; blocks ~2450 ms, one byte clocked out at 5 baud |
+| `aty<ch>` | `<len> 0` + request bytes | K-line fast init; returns in ~108 ms with a 25/25 ms wake pulse |
+| `atw<ch>` | `<address>` (decimal, no payload) | K-line five-baud init, `atw3 51` for 0x33, as the vendor DLL sends it; blocks ~2450 ms, one byte clocked out at 5 baud |
 | `atl<ch>` | | stop every periodic message on the channel: answers `aro`, and the old ids then answer `are 13` (measured 2026-09-24). The vendor DLL's `CLEAR_PERIODIC_MSGS` and this driver's |
 | `atp` | ` <pin> <value>` | a pin verb sharing `atv`'s argument shape (the vendor DLL's format-string table has one template, `at%c %d %d %u`, for `p` and `v`). Answers `are 10` for every pin and value tried (pins 0, 1, 2, 6, 12, 15; values 1, 5000, 8000, 12000, 20000, `SHORT_TO_GROUND`, `VOLTAGE_OFF`), `are 5` for value 0, after 0.3–1.3 s. Function unknown; the DLL is not seen sending it |
 | `atx<ch>` | `<n>` | exists, echoes its argument in the error (`are 7 1`); purpose unknown |
@@ -195,7 +195,7 @@ ato3 0 10400 3 7 / atw3 51 8       ISO9141 connect, five-baud init to 0x33
 ```
 
 The DLL waits for `aro <seq>` (500 ms for most commands, 5 s for `atr` and
-`atg`) and ignores a reply without its number. An `att` sent **without** a
+`atg`) and ignores a reply without its number. An `att` sent without a
 number gets no reply at all, not even `are 9` on a bus with no ACK peer, and
 the firmware answers nothing else for about a second while it keeps trying;
 the numbered form on the same bus answers `are 9 <seq>` after 1.0 s. When
@@ -203,14 +203,16 @@ the numbered form on the same bus answers `are 9 <seq>` after 1.0 s. When
 and gives up; the application firmware does not answer it with either
 terminator, so it is a bootloader query. `PassThruReadVersion` is answered
 from the cached `ati` reply. This driver sends the same commands with the
-same arguments; the only differences are `atz` before `ata` at open, and
-`\r\n\r\n` before that as the DLL does.
+same arguments except in two places: at open it sends `\r\n\r\n` as the DLL
+does, then `atz` and `ata`, and `ati` after them; and it numbers a `Timeout=0`
+write so that its late reply can be recognised and dropped
+(`AB-OFFICIAL.md`).
 
 ---
 
 ## 5. Channels and protocols **[V]**
 
-**The channel id is the firmware protocol number.** `ato6` opens ISO15765, a
+The channel id is the firmware protocol number. `ato6` opens ISO15765, a
 second `ato6` answers `are 20` (`ERR_CHANNEL_IN_USE`), `atc6` closes it and
 `ato6` opens again. Tactrix's DLL opens every J2534 id on these channels:
 
@@ -230,17 +232,17 @@ supported". `ato0`, `ato1`, `ato10` and `ato11` all answer `are 3`, and a
 letter in the channel position (`atoC`) answers `are 7` with no sequence
 number: the letter is not parsed.
 
-**Protocols sharing a line are mutually exclusive, and the refusal is `are 3`,
-not `are 20`:** `ato4` is refused while ISO9141 holds K, `ato8` while ISO9141
-holds L, and the other way round. Otherwise there is **no cap on open
-channels**: 5, 6, 7 and 9 open together, and so do `ato7`, `ato3 4096 …`
+Protocols sharing a line are mutually exclusive, and the refusal is `are 3`,
+not `are 20`: `ato4` is refused while ISO9141 holds K, `ato8` while ISO9141
+holds L, and the other way round. Otherwise there is no cap on open
+channels: 5, 6, 7 and 9 open together, and so do `ato7`, `ato3 4096 …`
 (`ISO9141_K_LINE_ONLY`) and `ato9`.
 
-**Baud rate is not validated on open.** `ato5 0 123456 0`, `ato3 0 4800 0`,
+Baud rate is not validated on open. `ato5 0 123456 0`, `ato3 0 4800 0`,
 `ato4 0 9600 0` and `ato6 0 0 0` all answer `aro`. No `ERR_INVALID_BAUDRATE`
 (25) was ever produced; what a wrong rate does on the bus is unmeasured.
 
-**ISO-TP segmentation and flow control are performed by the firmware.** The
+ISO-TP segmentation and flow control are performed by the firmware. The
 host sends a whole service request and the firmware handles first frame,
 consecutive frames, flow-control frames on receive, and the ECU's block size
 and separation time on transmit. The host only passes the parameters through:
@@ -248,7 +250,7 @@ and separation time on transmit. The host only passes the parameters through:
 `BS_TX` (34) and `STMIN_TX` (35) for what we request of the ECU, and
 `ISO15765_WFT_MAX` (37) for how many WAIT frames to tolerate.
 
-What the host **does** have to manage is the USB link above ISO-TP: one
+What the host does have to manage is the USB link above ISO-TP: one
 command in flight at a time, a timed-out command's late reply discarded rather
 than handed to the next command (§9), a caller's `Timeout` spent across a
 whole `WriteMsgs` call rather than per message, and a receive queue whose
@@ -258,7 +260,7 @@ overruns are reported rather than silently dropped.
 
 ## 6. Error codes are J2534 codes **[V]**
 
-`are <n>` carries a **literal SAE J2534-1 return code**, so the mapping is the
+`are <n>` carries a literal SAE J2534-1 return code, so the mapping is the
 identity function. Confirmed by provoking each one:
 
 | Provocation | Reply | J2534 |
@@ -306,12 +308,12 @@ real capture:
 'a''r''6'  len  sts   timestamp     CAN id 0x7E0
 ```
 
-The timestamp is **microseconds since power-on** (two frames captured 1.2 s
+The timestamp is microseconds since power-on (two frames captured 1.2 s
 apart differed by 1 238 083) and wraps every ~71 minutes.
 
-For CAN and ISO15765 the payload begins with the **4-byte big-endian CAN
-identifier**, matching J2534's `Data[0..3]` convention, followed by the
-service data. K-line frames differ (§7.7).
+For CAN and ISO15765 the payload begins with the 4-byte big-endian CAN
+identifier, matching J2534's `Data[0..3]` convention, followed by the
+service data. K-line frames differ (§7.9).
 
 ### 7.2 The status byte **[V]**
 
@@ -319,7 +321,7 @@ service data. K-line frames differ (§7.7).
 |---|---|
 | `0x80` | START: announces a segmented message (§7.3) |
 | `0x40` | END: the frame completes a message |
-| `0x20` | LOOPBACK: our own transmit echoed back (§7.6) |
+| `0x20` | LOOPBACK: our own transmit echoed back (§7.7) |
 | `0x10` | transmit indication (§7.5) |
 | `0x02` | the frame's CAN id is 29-bit (§7.4) |
 
@@ -330,15 +332,15 @@ vehicle's chassis controller (2026-06-17):
 
 | Sequence on the wire | Meaning |
 |---|---|
-| one `0x40` frame: `id` + data | **a message that fit one CAN frame is a single END frame; nothing precedes it** |
-| `0x80` frame: `id` only, then `0x40` frame: `id` + data | **START carries the CAN id and nothing else.** It announces that a segmented message has begun; the data follows in END-terminated frames that carry the id again |
+| one `0x40` frame: `id` + data | a message that fit one CAN frame is a single END frame; nothing precedes it |
+| `0x80` frame: `id` only, then `0x40` frame: `id` + data | START carries the CAN id and nothing else. It announces that a segmented message has begun; the data follows in END-terminated frames that carry the id again |
 
 Observed for every segmented response (`$1A 87`, `$1A 9A`, `$1A 9C`,
 `$21 E4`, `$22 F1 90`, `$09 02`) and every single-frame one. No `0xC0`
 (START|END) frame was seen on receive; the driver accepts one as a complete
 message because the bits imply it.
 
-A driver must treat a START-without-END frame as an **indication**: in J2534
+A driver must treat a START-without-END frame as an indication: in J2534
 terms `ISO15765_FIRST_FRAME`, `DataSize` 4, `ExtraDataIndex` 0, exactly what
 J2534-1 §8.6 and A.4 prescribe for the first frame of a segmented receive.
 Folding it into the data yields a message with the CAN id twice and
@@ -365,8 +367,8 @@ Transmitting the same request four ways on the Caddy:
 |---|---|
 | `0x000` | `0x10` |
 | `0x040` `ISO15765_FRAME_PAD` | `0x10` |
-| `0x100` `CAN_29BIT_ID` | **`0x12`** |
-| `0x140` both | **`0x12`** |
+| `0x100` `CAN_29BIT_ID` | `0x12` |
+| `0x140` both | `0x12` |
 
 `0x02` tracks the 29-bit identifier exactly and nothing else; two third-party
 drivers read it as J2534's `START_OF_MESSAGE`, which would make `0x12`
@@ -388,8 +390,8 @@ DataSize 4`) and this driver deliver it. Periodic messages produce none
 
 ### 7.6 Long replies arrive in 70-byte chunks **[V]**
 
-A segmented ISO15765 reply is forwarded as it arrives, **70 data bytes (ten
-consecutive frames) at a time, every chunk repeating the 4-byte CAN id**:
+A segmented ISO15765 reply is forwarded as it arrives, 70 data bytes (ten
+consecutive frames) at a time, every chunk repeating the 4-byte CAN id:
 a `0x80` announcement with the id only, `0x00` middle chunks, a `0x40` last
 chunk. Measured on the bench ECU of §10, 2026-09-24, over all 6 162
 segmented replies of a 512 KB `$23` read (a raw wire log, `OPENPORT_LOG_HEX=1`),
@@ -413,18 +415,18 @@ this way matched two passes at different read sizes and an earlier dump.
 
 On a raw CAN channel with a pass-all filter, the frame you just sent comes
 back to you as an ordinary `0x00` frame. It is not a loopback: with a filter
-that excludes the transmitted id it does **not** come back. A CAN node sees
+that excludes the transmitted id it does not come back. A CAN node sees
 its own transmission on the wire, and a promiscuous filter shows it to you,
 indistinguishable from an ECU's frame. Filter by identifier.
 
 `LOOPBACK` (`ats<ch> 3 1`) adds a *second*, separate frame marked `0x20`
 whose payload is four zero bytes rather than the CAN id. Measured on raw CAN
-against the bench ECU (§10); the vendor DLL delivers it as a `TX_MSG_TYPE`
-message of four zero bytes, and so does this driver. On a bench with no bus
-a transmit still fails with `are 9` before any echo is produced: the echo
-follows a *successful* bus transmit.
+against the bench ECU (§10, 2026-09-16); the vendor DLL delivers it as a
+`TX_MSG_TYPE` message of four zero bytes, and so does this driver. On a bench
+with no bus a transmit still fails with `are 9` before any echo is produced:
+the echo follows a *successful* bus transmit.
 
-**Transmit echo on ISO15765 is reported on raw CAN channel 5**, not on the
+The transmit echo on ISO15765 is reported on raw CAN channel 5, not on the
 ISO15765 channel, measured against the bench ECU of §10 on 2026-09-24 **[V]**. A
 single-frame request with `LOOPBACK` on the ISO15765 channel gave, in order:
 `ar5` `0x20` with four zero bytes (the echo of the request; a 20-byte request
@@ -451,7 +453,7 @@ frames are message-for-message identical: `RxStatus` 0, `DataSize` 8,
 
 ### 7.9 The K-line frame layout **[P]**: sourced, not yet measured here
 
-For channels `'3'` and `'4'` (and presumably 7–9) the layout is **not** the
+For channels `'3'` and `'4'` (and presumably 7–9) the layout is not the
 uniform one above:
 
 | Frame | Body after the status byte |
@@ -463,8 +465,8 @@ uniform one above:
 
 Every implementation that has run K-line on this cable describes this
 asymmetry: `emdzej/j2534` (firmware `1.17.4877`, transmit encoder from a
-Ghidra disassembly of the vendor DLL: "K-line packets have **no
-timestamp**"), `opta-j2534-rs` (K-line verified on a Honda PGM-FI ECM: "the
+Ghidra disassembly of the vendor DLL: "K-line packets have no
+timestamp"), `opta-j2534-rs` (K-line verified on a Honda PGM-FI ECM: "the
 firmware does not insert a timestamp; payload begins immediately after kind";
 "the RxEnd payload is a 4-byte free-running timestamp, not user data"),
 `tuneforge`, and the `dschultzca` lineage. One of them has a fixture with an
@@ -489,32 +491,32 @@ K-line header byte.
 ### 8.1 Configuration parameters
 
 `atg<ch> <param>` / `ats<ch> <param> <value>`, with J2534 parameter numbers.
-**Support is per protocol.** Swept 1–37 with both `atg` and `ats`:
+Support is per protocol. Swept 1–37 with both `atg` and `ats`:
 
 | Protocol | Supported parameters |
 |---|---|
-| **6 ISO15765** | 1 DATA_RATE, 3 LOOPBACK, 23 BIT_SAMPLE_POINT, 24 SYNC_JUMP_WIDTH, 30 ISO15765_BS, 31 ISO15765_STMIN, 34 BS_TX, 35 STMIN_TX, 37 ISO15765_WFT_MAX |
-| **4 ISO14230** | 1 DATA_RATE (readable, **not** settable), 3 LOOPBACK, 7 P1_MAX, 10 P3_MIN, 12 P4_MIN, 14–18 W1–W5, 19 TIDLE, 20 TINIL, 21 TWUP, 22 PARITY, 25 W0, 32 DATA_BITS, 33 FIVE_BAUD_MOD |
+| 6 ISO15765 | 1 DATA_RATE, 3 LOOPBACK, 23 BIT_SAMPLE_POINT, 24 SYNC_JUMP_WIDTH, 30 ISO15765_BS, 31 ISO15765_STMIN, 34 BS_TX, 35 STMIN_TX, 37 ISO15765_WFT_MAX |
+| 4 ISO14230 | 1 DATA_RATE (readable, not settable), 3 LOOPBACK, 7 P1_MAX, 10 P3_MIN, 12 P4_MIN, 14–18 W1–W5, 19 TIDLE, 20 TINIL, 21 TWUP, 22 PARITY, 25 W0, 32 DATA_BITS, 33 FIVE_BAUD_MOD |
 
 Anything outside a protocol's set answers `are 1` (`ERR_NOT_SUPPORTED`). The
 driver forwards every parameter unfiltered and returns the device's answer.
 `W1` raised to 1000 ms is honoured: `atw` then takes 3501 ms instead of 2451.
 
-Tactrix's own parameter **`TX_PARAM_STOP_BITS` (0x9000)** exists: `atg9
+Tactrix's own parameter `TX_PARAM_STOP_BITS` (0x9000) exists: `atg9
 36864` reads 1 on the jack channel and `atg3 36864` on ISO9141, and `ats9
 36864 2` is accepted and reads back 2 (through the vendor DLL, 2026-09-16).
 
-**`SNIFF_MODE`** goes to the firmware in `ato`'s flags (`ato5 268435456
+`SNIFF_MODE` goes to the firmware in `ato`'s flags (`ato5 268435456
 500000 0`) and is accepted, but the cable still acknowledges frames (§10).
 Tactrix's `canlogger` sample connects with `SNIFF_MODE | CAN_ID_BOTH`; this
 driver passes the flag through as the vendor DLL does and logs the caveat.
 
-**Tactrix's private IOCTLs** (`TX_IOCTL_*`, 0x70000+) reach nothing on the
+Tactrix's private IOCTLs (`TX_IOCTL_*`, 0x70000+) reach nothing on the
 wire when called with a NULL input; their input structures are known only
 from the `klogger` sample (`TX_IOCTL_APP_SERVICE` with service 5, info 1
 returns the serial number). This driver does not implement them.
 
-**`READ_PROG_VOLTAGE` takes a pin in Tactrix's DLL.** J2534-1 passes `pInput`
+`READ_PROG_VOLTAGE` takes a pin in Tactrix's DLL. J2534-1 passes `pInput`
 NULL; the vendor DLL reads a pin number through `pInput` and sends `atr
 <pin>`, and with NULL returns -1 and sends nothing (measured under emulation,
 2026-09-16). This driver accepts both: the named pin when `pInput` is given,
@@ -522,7 +524,7 @@ pin 12 when it is NULL.
 
 ### 8.2 Readable pins
 
-`atr <pin>`, sweeping 0–20: **four** pins answer, all others `are 19`. The
+`atr <pin>`, sweeping 0–20: four pins answer, all others `are 19`. The
 meanings are from Tactrix's header (`j2534_tactrix.h`); the readings are
 measured, in millivolts:
 
@@ -533,7 +535,7 @@ measured, in millivolts:
 | 16 | 130–152 floating on USB power; 11 894 from an 11.9 V bench supply; 12 156–12 199 on a vehicle with a ~12.2 V battery | J1962 pin 16, battery: `READ_VBATT` |
 | 17 | 5729–5794, drifting, with no output enabled | `PIN_VADJ`, the adjustable output supply that `atv` switches onto a pin; not a J1962 pin |
 
-**The 2.5 mm jack takes pin 12 away from the vehicle.** Per Tactrix, the
+The 2.5 mm jack takes pin 12 away from the vehicle. Per Tactrix, the
 jack's tip is OEM12 and inserting a plug disconnects OEM12 from J1962 pin 12;
 `atr 12` then reads the jack tip and `atv 12` drives it. Its ring and sleeve
 are an RS-232 receive input for Innovate MTS devices, channel 9. **[U]**: no
@@ -572,16 +574,16 @@ What each pin supports, from Tactrix's header and product description:
 
 Facts a driver has to act on, because the cable does not:
 
-- **The range is 5000–20000 mV**, inclusive. Tactrix's description says
+- The range is 5000–20000 mV, inclusive. Tactrix's description says
   5–25 V; the firmware refuses anything above 20 V.
-- **All voltage pins share one supply.** Setting a second pin moves the first
+- All voltage pins share one supply. Setting a second pin moves the first
   to the new voltage without switching it off. J2534-1 §7.2.11 requires one
   pin at a time; this driver refuses a second pin with `ERR_PIN_INVALID`
   until the first is off. The vendor DLL passes it through.
-- **Pin 17 reads back the supply** within about 3 %, and keeps its last
+- Pin 17 reads back the supply within about 3 %, and keeps its last
   setpoint after the pin is switched off.
-- **Grounding K kills the channel it carries.** `SHORT_TO_GROUND` on pins 7
-  and 15 answers `aro` **including while ISO9141 is open on K**, and the
+- Grounding K kills the channel it carries. `SHORT_TO_GROUND` on pins 7
+  and 15 answers `aro` including while ISO9141 is open on K, and the
   vendor DLL passes the call through. This driver refuses to ground K under
   an open ISO9141 or ISO14230 channel, or L under an open L-line channel, and
   refuses to open such a channel on a pin it has grounded (`ERR_CHANNEL_IN_USE`
@@ -589,8 +591,9 @@ Facts a driver has to act on, because the cable does not:
   for initialisation unless opened `ISO9141_K_LINE_ONLY`, and whether this
   firmware drives L on channels 3 and 4 needs a scope on pin 15 during a
   five-baud init.
-- **`ata` and `atz` release every output.** This driver sends both at open
-  and `atz` at close, so a session never inherits or leaves a live pin.
+- `ata` and `atz` release every output. This driver sends both at open
+  and `atz` at close, so a session never inherits a live pin and leaves none
+  when it closes.
 
 ---
 
@@ -631,7 +634,7 @@ one-cable bench lacks. One session-less identification request answered in
 two wire frames and reassembled to 22 bytes through the driver. Periodic tests
 used 0x7FF, an id absent from the module's receive table, with a zero payload.
 
-**Firmware periodic messages (`atm`).**
+Firmware periodic messages (`atm`):
 
 | Question | Measured |
 |---|---|
@@ -650,7 +653,7 @@ resets the cable, so the next session starts clean, and `PassThruClose`
 resets it too. A process killed between the two leaves the message running
 until the next open, exactly as with the vendor driver.
 
-**`SNIFF_MODE`.** Three windows on raw CAN with a pass-all filter: normal
+`SNIFF_MODE`. Three windows on raw CAN with a pass-all filter: normal
 open, 2 s → 101 status frames; `ato5 268435456`, 3 s → 151 frames; normal
 again, 2 s → 101 frames; 20.0 ms apart in all three. On a `SNIFF_MODE`
 channel `att5 12 0 1000000` answers `aro` in 60 ms and the frame appears on
@@ -658,10 +661,10 @@ the bus, which a listen-only controller cannot do; the same on a first open
 straight after `atz`/`ata`, and with `SNIFF_MODE | CAN_ID_BOTH`
 (`ato5 268437504`). Firmware 1.17.4877 accepts the flag and ignores it.
 
-**Transmit with a peer.** `att5 12 0 1000000` answers `aro`; on an empty bus
+Transmit with a peer. `att5 12 0 1000000` answers `aro`; on an empty bus
 it is `are 9` after ~1.3 s, with or without battery voltage on pin 16.
 
-**Against Tactrix's DLL on live traffic** (`AB-OFFICIAL.md` replays):
+Against Tactrix's DLL on live traffic (`AB-OFFICIAL.md` replays):
 
 - `ISO9141_CH1` opens as `ato3` and `ISO14230_CH1` as `ato4`.
 - Raw CAN receive is message-for-message the same (§7.8), and so is the
@@ -669,7 +672,7 @@ it is `are 9` after ~1.3 s, with or without battery voltage on pin 16.
 - With `LOOPBACK` on and a pass-all filter, one transmit gives the application
   two messages from both drivers: the frame itself (`RxStatus` 0, 12 bytes)
   and a `TX_MSG_TYPE` message of four zero bytes.
-- **Receive queue.** Left unread for 30 s, the vendor DLL delivered all ~1,500
+- Receive queue. Left unread for 30 s, the vendor DLL delivered all ~1,500
   frames. A 64-message queue kept 64 and dropped 1,438; this driver stores
   each message at its own size in a 1 MiB ring per channel (about 29,000 raw
   CAN frames) and delivered 1,503 frames over the same 30 s with no gap.
@@ -693,29 +696,37 @@ SAE J1979 / ISO 15031-5, every read among them exercised on a 2012 VW Caddy on
 | `$0A` | permanent DTCs | silent: not supported by this vehicle |
 
 `$04` (clear DTCs) and `$08` (on-board system control) write or actuate and
-were never sent. An unsupported mode or PID draws **no reply at all** rather
+were never sent. An unsupported mode or PID draws no reply at all rather
 than a negative response, so silence is a conformant answer.
 
-Two things a caller must get right, both found the hard way:
+Two things a caller must get right:
 
-- **Pad the request.** ISO 15765-4 clause 8.1 requires a DLC of eight on every
+- Pad the request. ISO 15765-4 clause 8.1 requires a DLC of eight on every
   diagnostic CAN frame and says a shorter one shall be ignored. The OpenPort
   pads only when the caller sets `ISO15765_FRAME_PAD`; the Caddy ignored the
   same request unpadded. The simulator's ECU enforces this too.
-- **Flow control goes to the physical id.** A functional request (`0x7DF`)
+- Flow control goes to the physical id. A functional request (`0x7DF`)
   whose reply is segmented needs its flow-control filter addressed to the
   ECU's *physical* id, not to `0x7DF`; broadcast to `0x7DF` it never arrives
   and every multi-frame reply stalls after the first frame with no error.
 
-**VAG is a different transport.** A 2009 Audi 1.9 TDI answered no ISO15765
-request while acknowledging every frame: VAG modules of that era are reached
-with VW TP2.0 on raw CAN (a channel opened on id 0x200, the module naming
-the pair of ids to use). `tools/car/car_capture.py --tp20` implements it over
-this driver's raw CAN channel; `s_tp20` in the simulator scenarios covers it.
+VAG is a different transport. VAG modules of that era are reached with VW
+TP2.0 on raw CAN (a channel opened on id 0x200, the module naming the pair of
+ids to use). On a 2009 Audi 1.9 TDI, on 2026-09-13, the capture tool's
+ISO15765 requests got no answer while every frame was acknowledged; the tool
+sent them unpadded at the time (above). On the same car's raw CAN channel the
+engine answered a legislated `$01 00` sent to 0x7DF, on 0x7E8, identically
+through both drivers (`AB-OFFICIAL.md`). `tools/car/car_capture.py --tp20`
+implements TP2.0 over this driver's raw CAN channel and `s_tp20` in the
+simulator scenarios covers it. On the same car, the same day, it opened a
+channel to the engine module (0x01) and read five identification records
+through it, the flash-status record `1A 9C` among them.
 The same car's K-line answered no five-baud or fast init at any of eight VAG
 addresses through either this driver or the vendor DLL, although the line is
 electrically present (a fast init takes 126–132 ms on the car against 78 ms on
-the bench), so the failure is the car, not the driver.
+the bench). The failure is not the driver's: either OBD pin 7 is not on a live
+K-line on this car, or the cable's five-baud waveform is not what this ECU
+accepts (`AB-OFFICIAL.md`).
 
 ---
 
@@ -723,7 +734,7 @@ the bench), so the failure is the car, not the driver.
 
 | Question | What would close it |
 |---|---|
-| **K-line frame layout** (§7.9), the five-baud `arw` reply and a fast-init `ary` success | one K-line session recorded with `car_capture.py --kline`, or a bench OBD simulator that speaks ISO 9141-2 / KWP2000 |
+| K-line frame layout (§7.9), the five-baud `arw` reply and a fast-init `ary` success | one K-line session recorded with `car_capture.py --kline`, or a bench OBD simulator that speaks ISO 9141-2 / KWP2000 |
 | Whether the L line and the 2.5 mm jack carry data on channels 7–9 | an L-line ECU or an Innovate device |
 | Whether the firmware drives L on channels 3 and 4 | a scope on pin 15 during a five-baud init |
 | How extended addressing (`ISO15765_ADDR_TYPE`) is marked on receive | an ECU that uses it |
@@ -775,7 +786,7 @@ template and readable pins are 8, 12, 16, 17 (all `Mackanized/op2j2534`).
 | Source | What it settles |
 |---|---|
 | SAE J2534-1 DEC2004 (04.04) §7.2.5, §8.5–8.7, A.2–A.4 | what an application must be shown for indications and segmented receives; the `RxStatus` bit table; message size limits |
-| Vehicle sessions: 2026-06-17 (chassis controller, ISO15765), 2026-09-13 (2012 VW Caddy; 2009 Audi 1.9 TDI), 2026-09-16 (bench chassis ECU) | the frame sequences, status bits, transmit indication, raw CAN, periodic timing, `SNIFF_MODE` |
+| Vehicle sessions: 2026-06-17 (chassis controller, ISO15765), 2026-09-13 (2012 VW Caddy; 2009 Audi 1.9 TDI), 2026-09-16 and 2026-09-24 (bench chassis ECU) | the frame sequences, status bits, transmit indication, raw CAN, periodic timing, `SNIFF_MODE`, long-reply chunking, the ISO15765 loopback echo |
 | `op20pt32.dll` 1.02.0.4868 under emulation and against the cable (`AB-OFFICIAL.md`) | every command the vendor sends, sequence numbers, `atm`, chunk layout, `tbi`, `READ_PROG_VOLTAGE`'s pin argument |
 | Tactrix `openport2_setup_1024820.exe` → `samples/common/j2534_tactrix.h`, `samples/canlogger/canlogger.cpp`, `samples/klogger/klogger.cpp` | the vendor's header (private IOCTLs, J2534-2 ids, `SNIFF_MODE`, OEM error codes, pin numbering) and the vendor's own consumers discarding `START_OF_MESSAGE` messages |
 | Tactrix EcuFlash changelog (firmware 1.41, 1.42, 1.44) | K-line loopback follows the flag; TX_FLAG_DONE messages are timestamped; CAN_29BIT_ID on read results |
