@@ -1,6 +1,8 @@
 # Release notes
 
-## Unreleased
+## 0.3.1 (2026-09-24)
+
+Documentation only. The library is unchanged apart from its version number.
 
 - Documentation rewritten for readability: a shorter README, a new guide to the J2534 API on this cable (`docs/API.md`), and the protocol, testing and comparison notes reorganised with a summary first.
 
