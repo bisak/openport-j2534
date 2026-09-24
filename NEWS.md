@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Documentation rewritten for readability: a shorter README, and a new guide to the J2534 API on this cable, `docs/API.md`.
+- Documentation rewritten for readability: a shorter README, a new guide to the J2534 API on this cable (`docs/API.md`), and the protocol, testing and comparison notes reorganised with a summary first.
 
 ## 0.3.0 (2026-09-24)
 
