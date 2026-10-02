@@ -313,6 +313,18 @@ def s_disconnect():
     stop.set()
 
 
+def s_idle_sim_does_not_spin():
+    path, stop, th, sim = scenario("an idle simulator burns no CPU")
+    time.sleep(0.1)                                # let the serve loop start
+    c0, t0 = time.process_time(), time.time()
+    time.sleep(0.5)
+    used, wall = time.process_time() - c0, time.time() - t0
+    # Listing the pty master as a write fd to select() made it return at once, so the
+    # serve thread spun at 100% and every sim-backed test ran hot for no reason.
+    check(used < 0.1, f"{used:.2f}s of CPU in {wall:.2f}s of waiting", used)
+    stop.set()
+
+
 def s_truncated():
     ecu = {b"\x3e\x00": b"\x7e\x00"}
     f = Faults(); f.truncate_frames = True
@@ -717,7 +729,7 @@ def s_chunking_models():
 
 
 SCENARIOS = [s_happy_path, s_multiframe, s_no_ack, s_backlog, s_dropped_reply,
-             s_disconnect, s_truncated, s_garbage, s_loopback,
+             s_disconnect, s_idle_sim_does_not_spin, s_truncated, s_garbage, s_loopback,
              s_periodic_keepalive, s_consumer_rule, s_tp20, s_tp20_silent_module,
              s_frame_pad, s_capture_tool_pads,
              s_chunking_models]

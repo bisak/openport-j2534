@@ -840,7 +840,7 @@ class OpenPortSim:
     def serve(self, master_fd, stop_evt):
         line, pend, want = b"", b"", 0
         while not stop_evt.is_set() and not self.closed:
-            r, w, _ = select.select([master_fd], [master_fd], [], 0.02)
+            r, _, _ = select.select([master_fd], [], [], 0.02)
             if master_fd in r:
                 try: data = os.read(master_fd, 4096)
                 except OSError: break
