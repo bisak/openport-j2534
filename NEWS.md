@@ -1,9 +1,12 @@
 # Release notes
 
-## Unreleased
+## 0.3.2 (2026-10-03)
+
+The library is unchanged apart from its version number.
 
 - `tools/car/car_capture.py` checks the cable's K-line before any wake-up by sending one request with `LOOPBACK` on and comparing the echo, adds a `FIVE_BAUD_MOD` 3 wake-up, a fast init by hand that listens a full second for a slow ECU, and reads at the EDC16's own address 0x10, and can record pin 7 passively with `--kline-listen`.
 - Protocol notes: the K-line echo layout and the checksum on the wire, measured on the bench; the Audi K-line notes corrected.
+- The test simulator's serve loop no longer spins at 100% CPU while idle (it listed the pty master as a write fd to `select()`); a scenario now guards it.
 
 ## 0.3.1 (2026-09-24)
 
