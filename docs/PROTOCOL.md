@@ -561,7 +561,9 @@ START or END frame whose body is exactly four bytes does, and every other
 frame, a transmit indication included, is data. A K-line START, a loopback
 one included, is delivered as a `START_OF_MESSAGE` indication with no data;
 an END delivers the message, `TX_MSG_TYPE` when the END carries `0x20`. This
-driver applies the same rule.
+driver applies the same rule, and on the bench (2026-10-07, nothing on pin 7)
+delivers the echo of `68 6A F1 01 00` as exactly that: an indication with
+`RxStatus` 2 and no data, then the five bytes with `RxStatus` 1 **[V]**.
 
 The echo rows are measured (bench, nothing on pin 7, 2026-09-24). A transmit
 with `LOOPBACK` on, no init first:

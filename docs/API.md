@@ -114,7 +114,9 @@ Return codes that follow the standard:
   against a bare `aro`).
 - Once the cable is gone, every call returns `ERR_DEVICE_NOT_CONNECTED` at
   once (Tactrix: `ERR_TIMEOUT` from every call, read from its code), and the
-  next `PassThruOpen` closes the dead session itself.
+  next `PassThruOpen` closes the dead session itself. Measured by unplugging
+  the USB lead mid-session (2026-10-07): the call in flight returned within a
+  millisecond, and the reopen after replugging needed no Close.
 - The cable's own `ERR_OEM_VOLTAGE_TOO_HIGH` (0x77) and `ERR_OEM_VOLTAGE_TOO_LOW`
   (0x78) pass through, as they do with Tactrix.
 
