@@ -28,12 +28,18 @@
 
 #include <libusb.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define OP_VID 0x0403
-#define OP_PID 0xCC4D
+#define OP_VID            0x0403
+#define OP_PID            0xCC4D
+/* With a microSD card inserted the cable enumerates as a storage composite
+ * with no serial link (user report, PROTOCOL.md section 12); in its
+ * bootloader it is cc4b (vendor INF). Neither can be driven. */
+#define OP_PID_STORAGE    0xCC4C
+#define OP_PID_BOOTLOADER 0xCC4B
 
 /* libusb treats timeout 0 as "block forever". We never want that: a wedged
  * cable must surface as a timeout, not a hang. A caller asking for 0 means
@@ -48,13 +54,11 @@ typedef struct {
     uint32_t              kernel_bound;   /* interfaces with a kernel driver at open */
     uint8_t               ep_in;
     uint8_t               ep_out;
-    uint16_t              max_packet_in;
 } op_usb;
 
 static _Thread_local char g_detail[256];
 
-static void set_detail(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-#include <stdarg.h>
+__attribute__((format(printf, 1, 2)))
 static void set_detail(const char *fmt, ...)
 {
     va_list ap;
@@ -114,8 +118,13 @@ static int find_bulk_interface(libusb_device *dev, int *out_intf,
                 uint8_t ep_in = 0, ep_out = 0;
                 uint16_t mps_in = 64;
 
-                if (id->bInterfaceClass == LIBUSB_CLASS_MASS_STORAGE)
+                /* A storage interface has a bulk pair too; claiming it would
+                 * send `atz` to a SCSI endpoint and report a protocol fault
+                 * instead of the microSD advice below. */
+                if (id->bInterfaceClass == LIBUSB_CLASS_MASS_STORAGE) {
                     *saw_mass_storage = 1;
+                    continue;
+                }
 
                 for (e = 0; e < id->bNumEndpoints; e++) {
                     const struct libusb_endpoint_descriptor *ed = &id->endpoint[e];
@@ -231,6 +240,7 @@ static op_status usb_read(op_transport *t, uint8_t *buf, size_t cap,
         return from_libusb(r);
     }
     if (moved < 0) return OP_ERR_IO;
+    if (moved == 0) return OP_ERR_TIMEOUT;   /* a zero-length packet: no data */
     *got = (size_t)moved;
     op_log_bytes("RX", buf, *got);
     return OP_OK;
@@ -263,7 +273,7 @@ static void usb_close(op_transport *t)
 }
 
 static const op_transport_ops g_usb_ops = {
-    "usb-bulk", usb_write, usb_read, usb_close
+    usb_write, usb_read, usb_close
 };
 
 op_status op_usb_open(op_transport *out)
@@ -303,7 +313,16 @@ op_status op_usb_open(op_transport *out)
         libusb_device_handle *h = NULL;
 
         if (libusb_get_device_descriptor(list[i], &dd) != LIBUSB_SUCCESS) continue;
-        if (dd.idVendor != OP_VID || dd.idProduct != OP_PID) continue;
+        if (dd.idVendor != OP_VID) continue;
+        if (dd.idProduct == OP_PID_STORAGE) { mass_storage_seen = 1; continue; }
+        if (dd.idProduct == OP_PID_BOOTLOADER) {
+            set_detail("The OpenPort is in its bootloader (%04x:%04x): a firmware "
+                       "update was interrupted. Tactrix's Windows driver recovers it.",
+                       OP_VID, OP_PID_BOOTLOADER);
+            st = OP_ERR_NO_DEVICE;
+            continue;
+        }
+        if (dd.idProduct != OP_PID) continue;
 
         if (!find_bulk_interface(list[i], &intf, &ep_in, &ep_out, &mps, &ms)) {
             mass_storage_seen |= ms;
@@ -352,7 +371,6 @@ op_status op_usb_open(op_transport *out)
         u->kernel_bound  = bound;
         u->ep_in         = ep_in;
         u->ep_out        = ep_out;
-        u->max_packet_in = mps;
 
         out->ops  = &g_usb_ops;
         out->impl = u;

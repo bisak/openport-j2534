@@ -24,7 +24,7 @@ static op_transport_factory g_factory = op_transport_open;
 
 void op_device_set_factory(op_transport_factory f)
 {
-    g_factory = (f != NULL) ? f : op_usb_open;
+    g_factory = (f != NULL) ? f : op_transport_open;
 }
 
 long op_status_to_j2534(op_status st)
@@ -176,7 +176,7 @@ static void absorb_frame(op_device *d, const op_reply *r)
 {
     op_channel *c;
     PASSTHRU_MSG *p;
-    J_U32 base, wide = 0;
+    J_U32 base, wide = 0, ext = 0;
     size_t room, take, skip = 0;
     int loopback;
 
@@ -200,11 +200,19 @@ static void absorb_frame(op_device *d, const op_reply *r)
     /* Measured on CAN only; what the low nibble carries on K-line is unread. */
     if ((base == CAN || base == ISO15765) && (r->status & OP_STS_29BIT))
         wide = CAN_29BIT_ID;
+    if (base == ISO15765 && (r->status & OP_STS_EXT_ADDR))
+        ext = ISO15765_ADDR_TYPE;
 
-    if (r->status & OP_STS_TX_IND) {
+    if (r->status & OP_STS_UNKNOWN_08)
+        op_logf("channel %u: frame with status 0x%02x (bit 0x08 unmeasured; delivered)",
+                r->channel, r->status);
+
+    /* On K-line the firmware sends no transmit indication (PROTOCOL.md 7.9)
+     * and Tactrix's DLL reads a 0x10 frame there as data. */
+    if ((r->status & OP_STS_TX_IND) && (base == CAN || base == ISO15765)) {
         /* J2534-1 section 8.6: a TxDone carries the CAN id of the message
          * just sent, which is what the frame holds. */
-        indicate(d, c, r, TX_MSG_TYPE | TX_DONE | wide, 1, 1);
+        indicate(d, c, r, TX_MSG_TYPE | TX_DONE | wide | ext, 1, 1);
         return;
     }
 
@@ -221,8 +229,18 @@ static void absorb_frame(op_device *d, const op_reply *r)
                     "unterminated; discarding them", r->channel,
                     (unsigned long)c->partial.DataSize);
         c->partial_active = 0;
+        c->ext_announced = ext != 0;
+        /* On K-line every START, a loopback one included, is a
+         * START_OF_MESSAGE indication with no data, as Tactrix's DLL delivers
+         * it (read from its code): the echo itself is the END-terminated
+         * message after it, marked TX_MSG_TYPE there. J2534-1 defines TX_DONE
+         * for ISO 15765 only, where a loopback START is the echo's TxDone. */
+        if (loopback && base != ISO15765) {
+            indicate(d, c, r, ISO15765_FIRST_FRAME, 1, 0);
+            return;
+        }
         indicate(d, c, r, (loopback ? (TX_MSG_TYPE | TX_DONE)
-                                    : ISO15765_FIRST_FRAME) | wide, 1,
+                                    : ISO15765_FIRST_FRAME) | wide | ext, 1,
                  loopback ? 0 : 1);
         return;
     }
@@ -231,20 +249,24 @@ static void absorb_frame(op_device *d, const op_reply *r)
     if (!c->partial_active) {
         memset(p, 0, sizeof *p);
         p->ProtocolID = c->protocol;
+        if (c->ext_announced) p->RxStatus |= ISO15765_ADDR_TYPE;
+        c->ext_announced = 0;
         c->partial_active = 1;
     } else if (base == ISO15765) {
-        /* Every chunk after the first repeats the 4-byte CAN id: the vendor
-         * DLL reassembles only that layout intact (docs/AB-OFFICIAL.md). */
-        if (r->data_len >= 4)
-            skip = 4;
-        else
+        /* Every chunk after the first repeats the CAN id, 5 bytes with an
+         * extended address: the vendor DLL reassembles only that layout
+         * intact (docs/AB-OFFICIAL.md). */
+        skip = ((p->RxStatus | ext) & ISO15765_ADDR_TYPE) ? 5 : 4;
+        if (r->data_len < skip) {
             op_logf("channel %u: continuation frame of %zu bytes carries no CAN id",
                     r->channel, r->data_len);
+            skip = 0;
+        }
     }
 
     p->Timestamp = r->timestamp_us;
     if (loopback) p->RxStatus |= TX_MSG_TYPE;
-    p->RxStatus |= wide;
+    p->RxStatus |= wide | ext;
 
     take = r->data_len - skip;
     room = sizeof p->Data - p->DataSize;
@@ -288,8 +310,14 @@ static void stash_reply(op_device *d, const op_reply *r)
 
     /* A numbered command accepts only the reply that echoes its number. A
      * frame carries none and is never a command reply; an `ari` carries none
-     * and only answers the unnumbered `ati`. */
-    if (d->seq_pending != 0 && r->kind != OP_REPLY_FRAME && r->kind != OP_REPLY_INIT) {
+     * and only answers the unnumbered `ati`. An init reply answers only an
+     * init: a late one must not become the next command's answer. */
+    if (r->kind == OP_REPLY_INIT && d->cmd_verb != 'y' && d->cmd_verb != 'w') {
+        op_logf("discarding init reply while command %lu (at%c) waits",
+                (unsigned long)d->seq_pending, d->cmd_verb);
+        return;
+    }
+    if (d->seq_pending != 0 && r->kind != OP_REPLY_INIT) {
         if (r->kind == OP_REPLY_INFO || r->ntail == 0) {
             op_logf("discarding unnumbered reply (kind %d) while command %lu waits",
                     (int)r->kind, (unsigned long)d->seq_pending);
@@ -323,33 +351,43 @@ static void stash_reply(op_device *d, const op_reply *r)
     }
     if (r->kind == OP_REPLY_INIT && r->data != NULL && r->data_len > 0) {
         size_t n = r->data_len;
+        /* `ary<ch> <len> [<seq>]`: Tactrix's DLL requires the number (read
+         * from its code), so a reply carrying another is stale. */
+        if (d->seq_pending != 0 && r->ntail > 0 && r->tail[r->ntail - 1] != d->seq_pending) {
+            op_logf("discarding init reply for command %lu while command %lu waits",
+                    (unsigned long)r->tail[r->ntail - 1], (unsigned long)d->seq_pending);
+            return;
+        }
         if (n > sizeof d->reply_data) n = sizeof d->reply_data;
         memcpy(d->reply_data, r->data, n);
         d->reply.data     = d->reply_data;
         d->reply.data_len = n;
-    } else if (r->kind == OP_REPLY_INIT && r->init_ntok > 0) {
+    } else if (r->kind == OP_REPLY_INIT && r->ntail > 0) {
         /* `arw<ch> <b> <b> ... [<seq>]`: the five-baud key bytes as decimal
-         * tokens. Every token is a byte except the echoed number, which is
-         * last and is not data. */
-        unsigned ntok = r->init_ntok, k;
+         * tokens, the echoed number last when there is one. Whether the
+         * firmware numbers `arw` is unmeasured: the one reply seen on a cable
+         * answered an unnumbered `atw` (PROTOCOL.md section 3), so the number
+         * is stripped only when it is there. A key byte cannot be mistaken
+         * for it: numbers start above 255 (op_device_open). */
+        unsigned ntok = r->ntail, k;
         size_t n = 0;
         if (d->seq_pending != 0) {
-            if (r->init_tok[ntok - 1] != d->seq_pending) {
+            if (r->tail[ntok - 1] == d->seq_pending) {
+                ntok--;
+            } else if (r->tail[ntok - 1] > 0xFF) {
                 op_logf("discarding init reply for command %lu while command %lu waits",
-                        (unsigned long)r->init_tok[ntok - 1],
-                        (unsigned long)d->seq_pending);
+                        (unsigned long)r->tail[ntok - 1], (unsigned long)d->seq_pending);
                 return;
             }
-            ntok--;
         }
         for (k = 0; k < ntok; k++) {
-            if (r->init_tok[k] > 0xFF) {
+            if (r->tail[k] > 0xFF) {
                 op_logf("init reply token %lu is not a byte; dropping the result",
-                        (unsigned long)r->init_tok[k]);
+                        (unsigned long)r->tail[k]);
                 n = 0;
                 break;
             }
-            d->reply_data[n++] = (uint8_t)r->init_tok[k];
+            d->reply_data[n++] = (uint8_t)r->tail[k];
         }
         d->reply.data     = n ? d->reply_data : NULL;
         d->reply.data_len = n;
@@ -400,6 +438,7 @@ static void *reader_main(void *arg)
 {
     op_device *d = (op_device *)arg;
     uint8_t tmp[1024];
+    unsigned failures = 0;
 
     while (!atomic_load(&d->reader_stop)) {
         size_t got = 0;
@@ -407,17 +446,26 @@ static void *reader_main(void *arg)
          * stop flag; data wakes it immediately regardless. */
         op_status st = op_read(&d->t, tmp, sizeof tmp, &got, 10);
 
-        if (st == OP_ERR_TIMEOUT) continue;
-        if (st == OP_ERR_NO_DEVICE) {
-            op_logf("reader: device disappeared");
+        if (st == OP_ERR_TIMEOUT) { failures = 0; continue; }
+        /* A dead pty or a stalled pipe answers every read with an error at
+         * once; fifty in a row is a lost cable, and until then the loop
+         * must not spin. */
+        if (st == OP_ERR_NO_DEVICE || (st != OP_OK && ++failures >= 50)) {
+            op_logf("reader: device %s", st == OP_ERR_NO_DEVICE
+                    ? "disappeared" : "fails every read; treating it as gone");
             pthread_mutex_lock(&d->lock);
-            /* Wake anyone blocked so they fail fast instead of hanging. */
+            d->lost = 1;
             pthread_cond_broadcast(&d->reply_cv);
             pthread_cond_broadcast(&d->rx_cv);
             pthread_mutex_unlock(&d->lock);
             break;
         }
-        if (st != OP_OK || got == 0) continue;
+        if (st != OP_OK || got == 0) {
+            struct timespec pause = { 0, 10000000L };
+            nanosleep(&pause, NULL);
+            continue;
+        }
+        failures = 0;
 
         pthread_mutex_lock(&d->lock);
         {
@@ -501,13 +549,14 @@ op_status op_device_open(op_device *d)
     d->accum_len   = 0;
     d->reply_valid = 0;
     d->cmd_waiting = 0;
+    d->lost        = 0;
     /* Start somewhere a previous session is unlikely to have reached, so a
      * reply it left in the pipe cannot carry a number this session is about
      * to wait for. */
     {
         struct timeval tv;
         gettimeofday(&tv, NULL);
-        d->seq_next = 1 + (uint32_t)((tv.tv_sec * 1000 + tv.tv_usec / 1000) % 900000);
+        d->seq_next = 256 + (uint32_t)((tv.tv_sec * 1000 + tv.tv_usec / 1000) % 900000);
     }
     d->seq_pending = 0;
     atomic_store(&d->reader_stop, 0);
@@ -521,7 +570,9 @@ op_status op_device_open(op_device *d)
         return OP_ERR_IO;
     }
     d->reader_started = 1;
+    pthread_mutex_lock(&d->lock);
     d->open = 1;                    /* op_device_cmd requires it */
+    pthread_mutex_unlock(&d->lock);
 
     st = sync_device(d);
     if (st != OP_OK) {
@@ -533,22 +584,29 @@ op_status op_device_open(op_device *d)
 
 void op_device_close(op_device *d)
 {
-    if (d == NULL || !d->open) return;
+    if (d == NULL) return;
 
     /* Closed first, under the lock, so a thread waiting in op_device_pop or
-     * cmd_exchange wakes and returns instead of sleeping on a dead device. */
+     * cmd_exchange wakes and returns instead of sleeping on a dead device,
+     * and so that two closes cannot both tear down. */
     pthread_mutex_lock(&d->lock);
+    if (!d->open) { pthread_mutex_unlock(&d->lock); return; }
     d->open = 0;
     pthread_cond_broadcast(&d->reply_cv);
     pthread_cond_broadcast(&d->rx_cv);
     pthread_mutex_unlock(&d->lock);
 
+    /* A command that already holds cmd_lock finishes (its wait has just been
+     * woken) before the transport goes away; one that takes it afterwards
+     * re-checks `open` and sends nothing. */
+    pthread_mutex_lock(&d->cmd_lock);
     atomic_store(&d->reader_stop, 1);
     if (d->reader_started) {
         pthread_join(d->reader, NULL);
         d->reader_started = 0;
     }
     op_close(&d->t);
+    pthread_mutex_unlock(&d->cmd_lock);
 }
 
 /* ---- command transaction ------------------------------------------------ */
@@ -568,17 +626,24 @@ static op_status cmd_exchange(op_device *d, const char *line, size_t line_len,
     if (payload_len > 0 && payload == NULL)
         return OP_ERR_PARAM;
     if (line_len >= sizeof numbered - 16) return OP_ERR_PARAM;
-    if (!d->open) return OP_ERR_NO_DEVICE;
     if (timeout_ms == 0) timeout_ms = 1000;
 
     pthread_mutex_lock(&d->cmd_lock);
+
+    pthread_mutex_lock(&d->lock);
+    if (!d->open || d->lost) {
+        pthread_mutex_unlock(&d->lock);
+        pthread_mutex_unlock(&d->cmd_lock);
+        return OP_ERR_NO_DEVICE;
+    }
+    pthread_mutex_unlock(&d->lock);
 
     memcpy(numbered, line, line_len);
     numbered[line_len] = '\0';
     if (op_cmd_is_numbered(numbered)) {
         size_t n;
         seq = d->seq_next++;
-        if (d->seq_next == 0) d->seq_next = 1;
+        if (d->seq_next < 256) d->seq_next = 256;   /* a key byte never looks like one */
         n = op_cmd_number(numbered, sizeof numbered, line_len, seq);
         if (n == 0) { pthread_mutex_unlock(&d->cmd_lock); return OP_ERR_PARAM; }
         line_len = n;
@@ -590,6 +655,7 @@ static op_status cmd_exchange(op_device *d, const char *line, size_t line_len,
     d->reply_valid = 0;
     d->cmd_waiting = wait;
     d->seq_pending = seq;
+    d->cmd_verb    = numbered[2];
     pthread_mutex_unlock(&d->lock);
 
     st = op_write(&d->t, (const uint8_t *)numbered, line_len, timeout_ms);
@@ -606,14 +672,14 @@ static op_status cmd_exchange(op_device *d, const char *line, size_t line_len,
 
     pthread_mutex_lock(&d->lock);
     deadline_in(&ts, timeout_ms);
-    while (!d->reply_valid && d->open && rc != ETIMEDOUT)
+    while (!d->reply_valid && d->open && !d->lost && rc != ETIMEDOUT)
         rc = pthread_cond_timedwait(&d->reply_cv, &d->lock, &ts);
 
     if (d->reply_valid) {
         if (reply != NULL) *reply = d->reply;
         d->reply_valid = 0;
         st = OP_OK;
-    } else if (!d->open) {
+    } else if (!d->open || d->lost) {
         st = OP_ERR_NO_DEVICE;
     } else {
         op_logf("command %lu timed out after %u ms; its reply, if it comes, "
@@ -654,13 +720,13 @@ op_status op_device_pop(op_device *d, unsigned channel, PASSTHRU_MSG *out,
     c = &d->ch[channel];
     pthread_mutex_lock(&d->lock);
 
-    if (c->qcount == 0 && d->open && timeout_ms > 0) {
+    if (c->qcount == 0 && d->open && !d->lost && timeout_ms > 0) {
         deadline_in(&ts, timeout_ms);
-        while (c->qcount == 0 && d->open && rc != ETIMEDOUT)
+        while (c->qcount == 0 && d->open && !d->lost && rc != ETIMEDOUT)
             rc = pthread_cond_timedwait(&d->rx_cv, &d->lock, &ts);
     }
 
-    if (!d->open) {
+    if (!d->open || d->lost) {
         st = OP_ERR_NO_DEVICE;
     } else if (c->qcount > 0) {
         op_qhdr h;
@@ -700,6 +766,7 @@ static void flush_locked(op_channel *c)
     c->rq_head = c->rq_tail = c->rq_used = 0;
     c->qcount = 0;
     c->partial_active = 0;
+    c->ext_announced = 0;
     c->dropped = 0;
 }
 
@@ -711,8 +778,7 @@ void op_device_flush_channel(op_device *d, unsigned channel)
     pthread_mutex_unlock(&d->lock);
 }
 
-op_status op_device_open_channel(op_device *d, unsigned channel, uint32_t protocol,
-                                 uint32_t flags, uint32_t baud)
+op_status op_device_open_channel(op_device *d, unsigned channel, uint32_t protocol)
 {
     op_channel *c;
     uint8_t *rq;
@@ -726,8 +792,6 @@ op_status op_device_open_channel(op_device *d, unsigned channel, uint32_t protoc
     if (rq != NULL) {
         c->open     = 1;
         c->protocol = protocol;
-        c->flags    = flags;
-        c->baud     = baud;
     }
     pthread_mutex_unlock(&d->lock);
     return rq != NULL ? OP_OK : OP_ERR_IO;

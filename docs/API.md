@@ -26,15 +26,15 @@ this page says so.
 
 | Function | Notes |
 |---|---|
-| `PassThruOpen`, `PassThruClose` | Both reset the cable: no channel, periodic message or pin voltage carries over between sessions. |
+| `PassThruOpen`, `PassThruClose` | Both reset the cable: no channel, periodic message or pin voltage carries over between sessions. `PassThruClose` returns the reset's failure code when the reset did not reach the cable; the session is closed either way. |
 | `PassThruConnect`, `PassThruDisconnect` | All J2534-1 protocols the cable has, plus the J2534-2 channel ids (`ISO9141_L`, `ISO14230_L`, `ISO9141_INNO` and the `_CH1` aliases). Connect flags go to the cable unchanged. |
 | `PassThruReadMsgs` | The timeout is honoured exactly. Each channel queues up to 1 MiB (about 29,000 raw CAN frames); an overrun returns `ERR_BUFFER_OVERFLOW` with the surviving messages still delivered. |
-| `PassThruWriteMsgs` | The timeout covers the whole call, and goes to the cable as its time budget for getting each message onto the bus. `Timeout=0` queues and returns. On failure, `pNumMsgs` holds the number actually sent. |
-| `PassThruStartPeriodicMsg`, `PassThruStopPeriodicMsg` | Scheduled by the cable, 10 per channel. Any interval the cable can run (up to 4,294,967 ms), not only J2534's 5–65535 ms. |
+| `PassThruWriteMsgs` | The timeout covers the whole call, and goes to the cable as its time budget for getting each message onto the bus. `Timeout=0` queues and returns, with a 50 ms bus budget on raw CAN, none on the 2.5 mm jack and 1 s otherwise, as Tactrix's driver sets them. On failure, `pNumMsgs` holds the number actually sent. A message whose `ProtocolID` is not the channel's protocol returns `ERR_MSG_PROTOCOL_ID`. |
+| `PassThruStartPeriodicMsg`, `PassThruStopPeriodicMsg` | Scheduled by the cable, 10 per channel. Any interval the cable can run (1 to 4,294,967 ms), not only J2534's 5–65535 ms; 0, which the cable accepts and never sends, returns `ERR_INVALID_TIME_INTERVAL`. |
 | `PassThruStartMsgFilter`, `PassThruStopMsgFilter` | PASS, BLOCK and FLOW_CONTROL, 10 per channel. A flow-control message passed with a PASS or BLOCK filter is ignored. |
 | `PassThruSetProgrammingVoltage` | See [Programming voltage](#programming-voltage). |
 | `PassThruReadVersion` | Firmware version from the cable; library version `openport-j2534 <version>`; API `04.04`. |
-| `PassThruGetLastError` | A description of the last failure, naming the call and the cause. |
+| `PassThruGetLastError` | A description of the last failure on the calling thread, naming the call and the cause. |
 | `PassThruIoctl` | See below. |
 
 ## IOCTLs
@@ -43,8 +43,9 @@ this page says so.
 |---|---|
 | `GET_CONFIG`, `SET_CONFIG` | Passed to the cable, which supports a different set per protocol ([below](#configuration-parameters)). The whole list is processed and the call returns the last parameter's status, as Tactrix's driver does; an unsupported parameter answers `ERR_NOT_SUPPORTED`. |
 | `READ_VBATT` | Battery voltage on OBD pin 16, in millivolts. |
-| `FIVE_BAUD_INIT`, `FAST_INIT` | Sent the way Tactrix's driver sends them. Not yet confirmed against a K-line ECU. |
-| `CLEAR_TX_BUFFER`, `CLEAR_RX_BUFFER` | Clear the driver's queues. |
+| `FIVE_BAUD_INIT`, `FAST_INIT` | Sent the way Tactrix's driver sends them. `FIVE_BAUD_INIT` needs an output array for the key bytes. Not yet confirmed against a K-line ECU. |
+| `CLEAR_RX_BUFFER` | Empties the channel's receive queue. |
+| `CLEAR_TX_BUFFER` | Nothing to clear: a transmit is on the wire before `PassThruWriteMsgs` returns. A no-op in Tactrix's driver too. |
 | `CLEAR_PERIODIC_MSGS`, `CLEAR_MSG_FILTERS` | One command to the cable each, as Tactrix's driver sends. |
 | `CLEAR_FUNCT_MSG_LOOKUP_TABLE` and the other two table IOCTLs | `ERR_NOT_SUPPORTED`: they are for J1850, which the cable does not have. |
 | `READ_PROG_VOLTAGE` | Reads the pin `pInput` points to (8, 12, 16, or 17 for the programming supply), or pin 12 when `pInput` is NULL. |
@@ -98,6 +99,24 @@ Return codes that follow the standard:
   `ERR_INVALID_CHANNEL_ID`).
 - After a failed write, `pNumMsgs` holds the number sent (Tactrix leaves the
   caller's value).
+- A message whose `ProtocolID` is not the channel's protocol returns
+  `ERR_MSG_PROTOCOL_ID` for writes, periodic messages and a filter's
+  flow-control message; a mask or pattern's `ProtocolID` is ignored, as
+  Tactrix's driver ignores it (Tactrix reroutes a written message by its
+  protocol instead, [below](#differences-from-tactrixs-driver)).
+- Connecting ISO 14230 while ISO 9141 holds K, or the other way round, and
+  likewise on L, returns `ERR_CHANNEL_IN_USE` without asking the cable
+  (Tactrix: `ERR_INVALID_PROTOCOL_ID`, the cable's own `are 3`).
+- A periodic message with an interval of 0 returns `ERR_INVALID_TIME_INTERVAL`
+  (Tactrix passes it on; the cable accepts it and never sends it).
+- A K-line init the ECU did not answer returns `ERR_INIT_FAILED` (0x21), a
+  code from a later revision of the standard (Tactrix: success, measured
+  against a bare `aro`).
+- Once the cable is gone, every call returns `ERR_DEVICE_NOT_CONNECTED` at
+  once (Tactrix: `ERR_TIMEOUT` from every call, read from its code), and the
+  next `PassThruOpen` closes the dead session itself.
+- The cable's own `ERR_OEM_VOLTAGE_TOO_HIGH` (0x77) and `ERR_OEM_VOLTAGE_TOO_LOW`
+  (0x78) pass through, as they do with Tactrix.
 
 Requests refused before they reach the cable (Tactrix passes them on):
 
@@ -109,16 +128,24 @@ Requests refused before they reach the cable (Tactrix passes them on):
 
 Routing:
 
-- A message goes out on the channel it was written to. Tactrix's driver picks
-  the channel from the message's `ProtocolID`.
+- A message goes out on the channel it was written to, and must carry that
+  channel's protocol. Tactrix's driver picks the channel from the message's
+  `ProtocolID` instead.
 - With both a raw CAN and an ISO 15765 channel open, frames the cable reports
   for CAN stay on the CAN channel. Tactrix's driver moves them to the ISO 15765
   channel.
+- With `LOOPBACK` on ISO 15765, the echo and the TxDone indication are delivered
+  in the order the cable reports them, which the timestamps show to be the true
+  order. Tactrix's driver delivers TxDone first, as J2534-1 describes. A
+  deliberate exception to the rule above, since reordering would hide the
+  measurement.
 
 Tactrix's driver crashes the calling process when `GET_CONFIG`, `SET_CONFIG`
 or `FAST_INIT` gets a NULL input. This one returns `ERR_NULL_PARAMETER` for the
-first two, and for `FAST_INIT` sends the wake-up pattern alone, which is what
-J2534 defines a NULL input to mean.
+first two, and for `FAST_INIT` sends the wake-up pattern alone (`aty<ch> 0 0`),
+which is what J2534 defines a NULL input to mean. Firmware 1.17.4877 makes the
+pulse and then answers `are 7`, so the call returns `ERR_FAILED`
+([PROTOCOL.md §7.9](PROTOCOL.md)).
 
 The full list, with measurements: [AB-OFFICIAL.md](AB-OFFICIAL.md).
 
@@ -126,6 +153,15 @@ The full list, with measurements: [AB-OFFICIAL.md](AB-OFFICIAL.md).
 
 - K-line has not been confirmed on a vehicle: no K-line ECU answered in the
   tests so far. The frame layout comes from other implementations
-  ([PROTOCOL.md §7.9](PROTOCOL.md)).
+  ([PROTOCOL.md §7.9](PROTOCOL.md)). Every known K-line use of this cable,
+  Tactrix's own logger sample included, connects with `ISO9141_NO_CHECKSUM`
+  and checksums in the application; do the same, since the cable's own
+  checksum handling is unobserved.
 - The L-line and jack channels open as Tactrix's driver opens them, but no
-  device on them has been seen to send data.
+  device on them has been seen to send data. Their frames are taken to have
+  the K-line layout.
+- `ISO15765_ADDR_TYPE` on a received message follows status bit `0x04` and a
+  5-byte header, as Tactrix's driver reads them; no ECU using extended
+  addressing has been captured on this cable.
+- The last-error text is kept per thread, where J2534-1 describes one for the
+  process.

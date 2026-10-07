@@ -277,7 +277,7 @@ static op_status mock_read(op_transport *t, uint8_t *buf, size_t cap,
 
 static void mock_close_(op_transport *t) { (void)t; }
 
-static const op_transport_ops g_ops = { "mock", mock_write, mock_read, mock_close_ };
+static const op_transport_ops g_ops = { mock_write, mock_read, mock_close_ };
 
 op_status mock_open(op_transport *out)
 {

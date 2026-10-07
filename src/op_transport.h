@@ -28,7 +28,6 @@ typedef enum {
 typedef struct op_transport op_transport;
 
 typedef struct {
-    const char *name;
     op_status (*write)(op_transport *t, const uint8_t *buf, size_t len,
                        unsigned timeout_ms);
     /* Reads at most cap bytes. On OP_OK *got is > 0. OP_ERR_TIMEOUT means no

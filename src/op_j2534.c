@@ -37,9 +37,6 @@
 #define OP_PIN_K            7
 #define OP_PIN_L            15
 
-/* ---- helpers ------------------------------------------------------------ */
-
-
 /* ---- call recording -------------------------------------------------------
  * OPENPORT_RECORD=<file> appends one line per entry-point call with every
  * input, in a form tools/ab-official/j2534_trace.c can replay against another
@@ -94,10 +91,21 @@ static void rec_msgs(const char *head, const PASSTHRU_MSG *m, J_U32 n)
     fputc('\n', g_rec);
 }
 
+/* A reason set deeper down (a size range, a dead K-line) is kept; only a
+ * bare code gets the call name and the code's name. */
 static long fail(long code, const char *what)
 {
-    op_err_set("%s: %s", what, op_err_name(code));
+    const char *name = op_err_name(code);
+    if (op_err_is_set()) return code;
+    if (strcmp(name, "ERR_UNKNOWN") == 0) op_err_set("%s: error %ld", what, code);
+    else op_err_set("%s: %s", what, name);
     return code;
+}
+
+/* fail() for a non-zero code; a success passes through untouched. */
+static long failed(long code, const char *what)
+{
+    return code == STATUS_NOERROR ? code : fail(code, what);
 }
 
 /* Translate an `are <n>` from the device. The firmware emits J2534 codes
@@ -207,8 +215,13 @@ long PassThruOpen(const void *pName, J_U32 *pDeviceID)
     if (pDeviceID == NULL)
         return fail(ERR_NULL_PARAMETER, "PassThruOpen(pDeviceID)");
 
-    if (d->open)
-        return fail(ERR_DEVICE_IN_USE, "PassThruOpen");
+    if (d->open) {
+        if (!d->lost)
+            return fail(ERR_DEVICE_IN_USE, "PassThruOpen");
+        /* The last session's cable went away; its Close may never come. */
+        op_logf("open: closing the lost session first");
+        op_device_close(d);
+    }
 
     st = op_device_open(d);
     if (st != OP_OK) {
@@ -271,6 +284,7 @@ long PassThruClose(J_U32 DeviceID)
     op_device *d = op_device_get();
     char line[OP_CMD_MAX];
     size_t n;
+    long rc;
 
     op_err_clear();
     rec_line("close %lu", (unsigned long)DeviceID);
@@ -280,13 +294,15 @@ long PassThruClose(J_U32 DeviceID)
         return fail(ERR_INVALID_DEVICE_ID, "PassThruClose");
 
     /* atz stops every periodic message, closes every channel and releases
-     * every pin (measured, PROTOCOL.md sections 8 and 10). */
+     * every pin (measured, PROTOCOL.md sections 8 and 10). The session is
+     * torn down either way; a reset that did not reach the cable is reported,
+     * since a pin may still carry voltage. */
     n = op_cmd_reset(line, sizeof line);
-    (void)simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
+    rc = simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
 
     op_device_close(d);
-    op_logf("closed");
-    return STATUS_NOERROR;
+    op_logf("closed%s", rc == STATUS_NOERROR ? "" : " without a reset");
+    return failed(rc, "PassThruClose: reset");
 }
 
 /* ---- 3. PassThruConnect ------------------------------------------------- */
@@ -311,6 +327,17 @@ long PassThruConnect(J_U32 DeviceID, J_U32 ProtocolID, J_U32 Flags,
         return fail(ERR_INVALID_PROTOCOL_ID, "PassThruConnect");
     if (d->ch[fw].open)
         return fail(ERR_CHANNEL_IN_USE, "PassThruConnect");
+    {
+        /* K is shared by channels 3 and 4, L by 7 and 8. The firmware refuses
+         * the second with `are 3` (PROTOCOL.md section 5), which would come
+         * back as ERR_INVALID_PROTOCOL_ID; the standard's code for a line
+         * in use is this one. */
+        int partner = fw == 3 ? 4 : fw == 4 ? 3 : fw == 7 ? 8 : fw == 8 ? 7 : -1;
+        if (partner >= 0 && d->ch[partner].open) {
+            op_err_set("PassThruConnect: channel %d holds the same line", partner);
+            return ERR_CHANNEL_IN_USE;
+        }
+    }
     if (Flags & SNIFF_MODE)
         op_logf("SNIFF_MODE requested: firmware 1.17.4877 accepts the flag but "
                 "still acknowledges frames (PROTOCOL.md section 10)");
@@ -337,8 +364,10 @@ long PassThruConnect(J_U32 DeviceID, J_U32 ProtocolID, J_U32 Flags,
 
     /* The firmware channel number is the channel id; messages carry the
      * protocol id the caller connected with. */
-    if (op_device_open_channel(d, (unsigned)fw, (uint32_t)ProtocolID,
-                               (uint32_t)Flags, (uint32_t)BaudRate) != OP_OK) {
+    if (op_device_open_channel(d, (unsigned)fw, (uint32_t)ProtocolID) != OP_OK) {
+        /* The firmware has it open; close it or the next Connect gets `are 20`. */
+        n = op_cmd_close(line, sizeof line, (unsigned)fw);
+        (void)simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
         op_err_set("PassThruConnect: no memory for the receive queue");
         return ERR_FAILED;
     }
@@ -371,9 +400,7 @@ long PassThruDisconnect(J_U32 ChannelID)
     rc = simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
 
     op_device_close_channel(d, (unsigned)ChannelID);
-
-    if (rc != STATUS_NOERROR) return fail(rc, "PassThruDisconnect");
-    return STATUS_NOERROR;
+    return failed(rc, "PassThruDisconnect");
 }
 
 /* ---- 5. PassThruReadMsgs ------------------------------------------------ */
@@ -399,36 +426,31 @@ long PassThruReadMsgs(J_U32 ChannelID, PASSTHRU_MSG *pMsg, J_U32 *pNumMsgs,
     if (want == 0) return STATUS_NOERROR;
 
     /* The caller's Timeout is honoured as given: not scaled, floored or
-     * doubled. */
+     * doubled. The wait wakes on data and on close, so each message gets one
+     * wait for whatever time is left. */
     gettimeofday(&start, NULL);
     for (;;) {
-        unsigned remaining;
+        unsigned remaining = 0;
         long elapsed_ms;
         op_status st;
 
-        st = op_device_pop(d, (unsigned)ChannelID, &pMsg[got], 0);
+        gettimeofday(&now, NULL);
+        elapsed_ms = (long)((now.tv_sec - start.tv_sec) * 1000L +
+                            (now.tv_usec - start.tv_usec) / 1000L);
+        if (elapsed_ms < 0) elapsed_ms = 0;
+        if ((J_U32)elapsed_ms < Timeout) {
+            J_U32 left = Timeout - (J_U32)elapsed_ms;
+            remaining = left > 0xFFFFFFFFu ? 0xFFFFFFFFu : (unsigned)left;
+        }
+
+        st = op_device_pop(d, (unsigned)ChannelID, &pMsg[got], remaining);
         if (st == OP_OK) {
             got++;
             if (got >= want) break;
             continue;
         }
         if (st != OP_ERR_TIMEOUT) goto closed;
-
-        gettimeofday(&now, NULL);
-        elapsed_ms = (long)((now.tv_sec - start.tv_sec) * 1000L +
-                            (now.tv_usec - start.tv_usec) / 1000L);
-        if (elapsed_ms < 0) elapsed_ms = 0;
-        if ((J_U32)elapsed_ms >= Timeout) break;
-
-        remaining = (unsigned)(Timeout - (J_U32)elapsed_ms);
-        if (remaining > 20u) remaining = 20u;
-        st = op_device_pop(d, (unsigned)ChannelID, &pMsg[got], remaining);
-        if (st == OP_OK) {
-            got++;
-            if (got >= want) break;
-        } else if (st != OP_ERR_TIMEOUT) {
-            goto closed;
-        }
+        if (remaining == 0) break;
     }
 
     *pNumMsgs = got;
@@ -476,8 +498,10 @@ long PassThruReadMsgs(J_U32 ChannelID, PASSTHRU_MSG *pMsg, J_U32 *pNumMsgs,
     return STATUS_NOERROR;
 
 closed:
-    /* PassThruClose ran on another thread while this call was waiting. */
+    /* The cable went away, or PassThruClose ran on another thread while this
+     * call was waiting. */
     *pNumMsgs = got;
+    if (d->open) return fail(ERR_DEVICE_NOT_CONNECTED, "PassThruReadMsgs: cable lost");
     return fail(ERR_INVALID_DEVICE_ID, "PassThruReadMsgs: device closed");
 }
 
@@ -488,10 +512,19 @@ closed:
  * the device. Checked for periodic messages too: the firmware refuses a short
  * `att` itself but runs a 3-byte `atm`, a CAN id it cannot form, every
  * interval (bench cable, 2026-09-24). */
-static long msg_size_ok(op_device *d, J_U32 channel, const PASSTHRU_MSG *m)
+static long msg_ok(op_device *d, J_U32 channel, const PASSTHRU_MSG *m)
 {
     J_U32 proto = op_protocol_base(d->ch[channel].protocol);
     size_t lo = 1, hi = sizeof m->Data;
+
+    /* J2534-1 section 7.2.6. The cable would frame a message of another
+     * protocol for the channel's, and the application could not tell. A
+     * J2534-2 id counts as its J2534-1 twin. */
+    if (op_protocol_base((J_U32)m->ProtocolID) != proto) {
+        op_err_set("message protocol %lu on a channel of protocol %lu",
+                   (unsigned long)m->ProtocolID, (unsigned long)d->ch[channel].protocol);
+        return ERR_MSG_PROTOCOL_ID;
+    }
     if (proto == CAN)            { lo = 4; hi = 12; }
     else if (proto == ISO15765)  { lo = (m->TxFlags & ISO15765_ADDR_TYPE) ? 5 : 4;
                                    hi = (m->TxFlags & ISO15765_ADDR_TYPE) ? 4100 : 4099; }
@@ -508,12 +541,14 @@ static long write_one(op_device *d, J_U32 channel, const PASSTHRU_MSG *m,
 {
     char line[OP_CMD_MAX];
     size_t n;
-    uint32_t budget_us = 1000000u;
+    /* The bus budget for a Timeout of 0, as Tactrix's DLL sets it (read from
+     * its code): 50 ms for a raw CAN frame, nothing on the 2.5 mm jack
+     * (channel 9, no bus to acknowledge), a second for the rest. */
+    uint32_t budget_us = op_protocol_base(d->ch[channel].protocol) == CAN ? 50000u
+                       : channel == 9 ? 0u : 1000000u;
+    long rc = msg_ok(d, channel, m);
 
-    if (m->DataSize == 0 || m->DataSize > sizeof m->Data)
-        return ERR_INVALID_MSG;
-    if (msg_size_ok(d, channel, m) != STATUS_NOERROR)
-        return ERR_INVALID_MSG;
+    if (rc != STATUS_NOERROR) return rc;
 
     /* ISO 15765-4 clause 8.1: a receiver ignores a diagnostic frame with a
      * DLC below eight, and the device pads only on ISO15765_FRAME_PAD. TxFlags
@@ -649,11 +684,11 @@ long PassThruStartPeriodicMsg(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
     /* Any interval the firmware's microsecond field can carry. J2534 asks for
      * 5-65535 ms; Tactrix's DLL forwards 4 ms and 65 536 ms alike and the
      * firmware runs them (1 ms held, PROTOCOL.md section 10). */
-    if (TimeInterval > 0xFFFFFFFFu / 1000u)
+    /* 0 the firmware accepts and never sends (PROTOCOL.md section 10). */
+    if (TimeInterval == 0 || TimeInterval > 0xFFFFFFFFu / 1000u)
         return fail(ERR_INVALID_TIME_INTERVAL, "PassThruStartPeriodicMsg");
-    if (pMsg->DataSize == 0 || pMsg->DataSize > sizeof pMsg->Data ||
-        msg_size_ok(d, ChannelID, pMsg) != STATUS_NOERROR)
-        return fail(ERR_INVALID_MSG, "PassThruStartPeriodicMsg");
+    rc = msg_ok(d, ChannelID, pMsg);
+    if (rc != STATUS_NOERROR) return fail(rc, "PassThruStartPeriodicMsg");
     if (c->nperiodic >= OP_PERIODIC_PER_CH)
         return fail(ERR_EXCEEDED_LIMIT, "PassThruStartPeriodicMsg");
 
@@ -681,7 +716,6 @@ long PassThruStopPeriodicMsg(J_U32 ChannelID, J_U32 MsgID)
     op_device *d = op_device_get();
     op_channel *c;
     unsigned i;
-    long rc;
 
     op_err_clear();
     rec_line("stopp %lu %lu", (unsigned long)ChannelID, (unsigned long)MsgID);
@@ -694,9 +728,7 @@ long PassThruStopPeriodicMsg(J_U32 ChannelID, J_U32 MsgID)
     if (i == c->nperiodic)
         return fail(ERR_INVALID_MSG_ID, "PassThruStopPeriodicMsg");
 
-    rc = periodic_stop(d, c, ChannelID, i);
-    if (rc != STATUS_NOERROR) return fail(rc, "PassThruStopPeriodicMsg");
-    return STATUS_NOERROR;
+    return failed(periodic_stop(d, c, ChannelID, i), "PassThruStopPeriodicMsg");
 }
 
 /* ---- 9. PassThruStartMsgFilter ------------------------------------------ */
@@ -709,7 +741,7 @@ long PassThruStartMsgFilter(J_U32 ChannelID, J_U32 FilterType,
 {
     op_device *d = op_device_get();
     unsigned need;
-    uint8_t payload[3 * J2534_MSG_DATA_MAX];
+    uint8_t payload[3 * 255];
     size_t used = 0, each;
     char line[OP_CMD_MAX];
     size_t n;
@@ -757,12 +789,18 @@ long PassThruStartMsgFilter(J_U32 ChannelID, J_U32 FilterType,
 
     /* The device takes ONE length and applies it to every appended message,
      * so they must agree; a mismatch would silently shift the pattern. */
+    /* The mask and pattern are byte masks the cable applies as given, so
+     * their ProtocolID is ignored, as Tactrix's DLL ignores it; the
+     * flow-control message is transmitted and must be the channel's protocol
+     * (the DLL checks that one; read from its code). */
+    if (pFlowControlMsg != NULL &&
+        op_protocol_base((J_U32)pFlowControlMsg->ProtocolID) !=
+        op_protocol_base(d->ch[ChannelID].protocol))
+        return fail(ERR_MSG_PROTOCOL_ID, "PassThruStartMsgFilter: flow-control protocol");
     for (i = 0; i < need; i++) {
         if ((size_t)msgs[i]->DataSize != each)
             return fail(ERR_INVALID_MSG,
                         "PassThruStartMsgFilter: message lengths differ");
-        if (each > sizeof payload - used)
-            return fail(ERR_EXCEEDED_LIMIT, "PassThruStartMsgFilter");
         memcpy(payload + used, msgs[i]->Data, each);
         used += each;
     }
@@ -814,8 +852,7 @@ long PassThruStopMsgFilter(J_U32 ChannelID, J_U32 FilterID)
     n = op_cmd_stop_filter(line, sizeof line, (unsigned)ChannelID,
                            (uint32_t)FilterID);
     rc = simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
-    if (rc != STATUS_NOERROR) return fail(rc, "PassThruStopMsgFilter");
-    return STATUS_NOERROR;
+    return failed(rc, "PassThruStopMsgFilter");
 }
 
 /* ---- 11. PassThruSetProgrammingVoltage ---------------------------------- */
@@ -888,6 +925,8 @@ long PassThruReadVersion(J_U32 DeviceID, char *pFirmwareVersion,
     rec_line("version %lu", (unsigned long)DeviceID);
     if (!d->open || DeviceID != OP_DEVICE_ID)
         return fail(ERR_INVALID_DEVICE_ID, "PassThruReadVersion");
+    if (d->lost)
+        return fail(ERR_DEVICE_NOT_CONNECTED, "PassThruReadVersion");
     if (pFirmwareVersion == NULL || pDllVersion == NULL || pApiVersion == NULL)
         return fail(ERR_NULL_PARAMETER, "PassThruReadVersion");
 
@@ -998,7 +1037,11 @@ static long ioctl_init(op_device *d, J_U32 ChannelID, int five_baud,
 
     if (five_baud) {
         const SBYTE_ARRAY *in = (const SBYTE_ARRAY *)pInput;
+        const SBYTE_ARRAY *out = (const SBYTE_ARRAY *)pOutput;
         if (in == NULL || in->BytePtr == NULL || in->NumOfBytes < 1)
+            return ERR_NULL_PARAMETER;
+        /* J2534-1 Figure 27: the key bytes need somewhere to go. */
+        if (out == NULL || out->BytePtr == NULL)
             return ERR_NULL_PARAMETER;
         n = op_cmd_five_baud(line, sizeof line, (unsigned)ChannelID, in->BytePtr[0]);
     } else {
@@ -1041,12 +1084,10 @@ static long ioctl_init(op_device *d, J_U32 ChannelID, int five_baud,
 
     if (five_baud) {
         SBYTE_ARRAY *out = (SBYTE_ARRAY *)pOutput;
-        if (out != NULL && out->BytePtr != NULL) {
-            size_t take = r.data_len;
-            if (take > out->NumOfBytes) take = out->NumOfBytes;
-            memcpy(out->BytePtr, r.data, take);
-            out->NumOfBytes = (J_U32)take;
-        }
+        size_t take = r.data_len;
+        if (take > out->NumOfBytes) take = out->NumOfBytes;
+        memcpy(out->BytePtr, r.data, take);
+        out->NumOfBytes = (J_U32)take;
     } else {
         PASSTHRU_MSG *out = (PASSTHRU_MSG *)pOutput;
         if (out != NULL) {
@@ -1091,53 +1132,53 @@ long PassThruIoctl(J_U32 ChannelID, J_U32 IoctlID, const void *pInput,
         /* J2534 declares pInput const, yet GET_CONFIG is defined to write
          * each Value back into the caller's SCONFIG list. The cast is the
          * standard's contradiction, not a discarded qualifier of ours. */
-        {
-            long rc = ioctl_get_config(d, ChannelID, (SCONFIG_LIST *)(uintptr_t)pInput);
-            return rc == STATUS_NOERROR ? rc : fail(rc, "PassThruIoctl(GET_CONFIG)");
-        }
+        return failed(ioctl_get_config(d, ChannelID, (SCONFIG_LIST *)(uintptr_t)pInput),
+                      "PassThruIoctl(GET_CONFIG)");
 
     case SET_CONFIG:
         if (channel_of(d, ChannelID) == NULL)
             return fail(ERR_INVALID_CHANNEL_ID, "PassThruIoctl(SET_CONFIG)");
-        {
-            long rc = ioctl_set_config(d, ChannelID, (const SCONFIG_LIST *)pInput);
-            return rc == STATUS_NOERROR ? rc : fail(rc, "PassThruIoctl(SET_CONFIG)");
-        }
+        return failed(ioctl_set_config(d, ChannelID, (const SCONFIG_LIST *)pInput),
+                      "PassThruIoctl(SET_CONFIG)");
 
     case READ_VBATT:
         /* Device-scoped, so it is valid before any channel exists. */
-        return ioctl_read_pin(d, OP_PIN_VBATT, (J_U32 *)pOutput);
+        return failed(ioctl_read_pin(d, OP_PIN_VBATT, (J_U32 *)pOutput),
+                      "PassThruIoctl(READ_VBATT)");
 
     case READ_PROG_VOLTAGE:
         /* J2534-1 passes NULL. Tactrix's DLL reads the pin number through
          * pInput and sends `atr <pin>` (measured under emulation, 2026-09-16);
          * without it the vendor returns -1 and touches nothing. */
-        return ioctl_read_pin(d, pInput != NULL ? (unsigned)*(const J_U32 *)pInput
-                                                : OP_PIN_PROG_VOLTAGE,
-                              (J_U32 *)pOutput);
+        return failed(ioctl_read_pin(d, pInput != NULL ? (unsigned)*(const J_U32 *)pInput
+                                                       : OP_PIN_PROG_VOLTAGE,
+                                     (J_U32 *)pOutput),
+                      "PassThruIoctl(READ_PROG_VOLTAGE)");
 
     case FIVE_BAUD_INIT:
         if (channel_of(d, ChannelID) == NULL)
             return fail(ERR_INVALID_CHANNEL_ID, "PassThruIoctl(FIVE_BAUD_INIT)");
-        {
-            long rc = ioctl_init(d, ChannelID, 1, pInput, pOutput);
-            return rc == STATUS_NOERROR ? rc : fail(rc, "PassThruIoctl(FIVE_BAUD_INIT)");
-        }
+        return failed(ioctl_init(d, ChannelID, 1, pInput, pOutput),
+                      "PassThruIoctl(FIVE_BAUD_INIT)");
 
     case FAST_INIT:
         if (channel_of(d, ChannelID) == NULL)
             return fail(ERR_INVALID_CHANNEL_ID, "PassThruIoctl(FAST_INIT)");
-        {
-            long rc = ioctl_init(d, ChannelID, 0, pInput, pOutput);
-            return rc == STATUS_NOERROR ? rc : fail(rc, "PassThruIoctl(FAST_INIT)");
-        }
+        return failed(ioctl_init(d, ChannelID, 0, pInput, pOutput),
+                      "PassThruIoctl(FAST_INIT)");
 
     case CLEAR_TX_BUFFER:
+        /* A transmit is on the wire before WriteMsgs returns, so there is
+         * nothing to clear; the receive queue is not it. */
+        if (channel_of(d, ChannelID) == NULL)
+            return fail(ERR_INVALID_CHANNEL_ID, "PassThruIoctl(CLEAR_TX_BUFFER)");
+        return STATUS_NOERROR;
+
     case CLEAR_RX_BUFFER:
         /* Host-side only, as the vendor DLL does it: the queue the
          * application reads from lives here. */
         if (channel_of(d, ChannelID) == NULL)
-            return fail(ERR_INVALID_CHANNEL_ID, "PassThruIoctl(CLEAR_*_BUFFER)");
+            return fail(ERR_INVALID_CHANNEL_ID, "PassThruIoctl(CLEAR_RX_BUFFER)");
         op_device_flush_channel(d, (unsigned)ChannelID);
         return STATUS_NOERROR;
 
@@ -1162,8 +1203,7 @@ long PassThruIoctl(J_U32 ChannelID, J_U32 IoctlID, const void *pInput,
          * keep (tools/ab-official, 2026-09-24). */
         n = op_cmd_clear_filters(line, sizeof line, (unsigned)ChannelID);
         rc = simple_cmd(d, line, n, NULL, 0, OP_DEFAULT_CMD_MS, NULL);
-        if (rc != STATUS_NOERROR) return fail(rc, "PassThruIoctl(CLEAR_MSG_FILTERS)");
-        return STATUS_NOERROR;
+        return failed(rc, "PassThruIoctl(CLEAR_MSG_FILTERS)");
     }
 
     /* The functional-message lookup table is a J1850 facility. This device

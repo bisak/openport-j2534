@@ -239,6 +239,8 @@ static void periodic_limit_is_per_channel(void)
     CHECK(tx_contains("atl5 ") && !tx_contains("atn"), "one atl stops every message on the channel, as the vendor DLL does");
     CHECK_EQ(PassThruIoctl(iso, CLEAR_PERIODIC_MSGS, NULL, NULL), STATUS_NOERROR, "clear");
     CHECK(tx_contains("atl6 "), "on the other channel too");
+    m.ProtocolID = CAN;
+    m.DataSize = 5;
     CHECK_EQ(PassThruStartPeriodicMsg(can, &m, &id, 1000), STATUS_NOERROR,
              "and the channel has room again");
     shut(dev);
@@ -356,6 +358,7 @@ static void timeouts_are_honoured(void)
     /* A silent device: the responder is removed, so nothing ever replies. */
     mock_set_responder(NULL);
     memset(&m, 0, sizeof m);
+    m.ProtocolID = ISO15765;
     m.DataSize = 6;
     n = 1;
     CHECK_EQ(PassThruWriteMsgs(ch, &m, &n, 100), ERR_TIMEOUT,
@@ -383,6 +386,7 @@ static void transport_failures_propagate(void)
 
     PassThruConnect(dev, ISO15765, 0, 500000, &ch);
     memset(&m, 0, sizeof m);
+    m.ProtocolID = ISO15765;
     m.DataSize = 6;
 
     mock_fail_writes(1, OP_ERR_IO);
@@ -461,9 +465,9 @@ static void filters(void)
 
     PassThruConnect(dev, ISO15765, 0, 500000, &ch);
 
-    memset(&mask, 0, sizeof mask); mask.DataSize = 4;
-    memset(&pat,  0, sizeof pat);  pat.DataSize  = 4;
-    memset(&fc,   0, sizeof fc);   fc.DataSize   = 4;
+    memset(&mask, 0, sizeof mask); mask.ProtocolID = ISO15765; mask.DataSize = 4;
+    memset(&pat,  0, sizeof pat);  pat.ProtocolID  = ISO15765; pat.DataSize  = 4;
+    memset(&fc,   0, sizeof fc);   fc.ProtocolID   = ISO15765; fc.DataSize   = 4;
     mask.Data[0]=0xFF; mask.Data[1]=0xFF; mask.Data[2]=0xFF; mask.Data[3]=0xFF;
     pat.Data[2]=0x07;  pat.Data[3]=0xE8;
     fc.Data[2]=0x07;   fc.Data[3]=0xE0;
@@ -530,6 +534,12 @@ static void ioctls(void)
         pin = 2;
         CHECK_EQ(PassThruIoctl(dev, READ_PROG_VOLTAGE, &pin, &v), ERR_PIN_INVALID,
                  "an unreadable pin is the device's ERR_PIN_INVALID");
+        {
+            char err[80];
+            PassThruGetLastError(err);
+            CHECK(strstr(err, "ERR_PIN_INVALID") != NULL,
+                  "a failed pin read leaves a last-error text, got \"%s\"", err);
+        }
     }
 
     PassThruConnect(dev, ISO15765, 0, 500000, &ch);
@@ -769,9 +779,9 @@ static void filter_takes_flow_control_flags(void)
     PASSTHRU_MSG mask, pat, fc;
 
     PassThruConnect(dev, ISO15765, 0, 500000, &ch);
-    memset(&mask, 0, sizeof mask); mask.DataSize = 4; mask.TxFlags = 0;
-    memset(&pat,  0, sizeof pat);  pat.DataSize  = 4; pat.TxFlags  = 0;
-    memset(&fc,   0, sizeof fc);   fc.DataSize   = 4;
+    memset(&mask, 0, sizeof mask); mask.ProtocolID = ISO15765; mask.DataSize = 4; mask.TxFlags = 0;
+    memset(&pat,  0, sizeof pat);  pat.ProtocolID  = ISO15765; pat.DataSize  = 4; pat.TxFlags  = 0;
+    memset(&fc,   0, sizeof fc);   fc.ProtocolID   = ISO15765; fc.DataSize   = 4;
     fc.TxFlags = ISO15765_FRAME_PAD;
 
     mock_clear_tx();
@@ -953,6 +963,7 @@ static void late_reply_is_not_reused(void)
 
     PassThruConnect(dev, ISO15765, 0, 500000, &ch);
     memset(&m, 0, sizeof m);
+    m.ProtocolID = ISO15765;
     m.DataSize = 6;
 
     /* A silent device: this write must time out. */
@@ -998,7 +1009,7 @@ static void write_timeout_is_a_call_budget(void)
 
     PassThruConnect(dev, ISO15765, 0, 500000, &ch);
     memset(msgs, 0, sizeof msgs);
-    for (i = 0; i < 5; i++) msgs[i].DataSize = 6;
+    for (i = 0; i < 5; i++) { msgs[i].ProtocolID = ISO15765; msgs[i].DataSize = 6; }
 
     /* Writes SUCCEED, but take 120 ms each. A silent device would not exercise
      * this: WriteMsgs returns on the first failure and never reaches message
@@ -1133,6 +1144,33 @@ static void stale_then_real_responder(const char *line, size_t len,
     }
 }
 
+/* The number is the LAST trailing token whatever precedes it. A reply with
+ * four of them used to run the parser's three-slot tail over its end. */
+static void long_tail_responder(const char *line, size_t len,
+                                const uint8_t *payload, size_t payload_len)
+{
+    char buf[64];
+    size_t copy = len < sizeof buf - 1 ? len : sizeof buf - 1;
+    (void)payload; (void)payload_len;
+    memcpy(buf, line, copy); buf[copy] = '\0';
+    if (strncmp(buf, "ati", 3) == 0) mock_push_str("ari main code version : 1.17.4877\r\n");
+    else if (strncmp(buf, "atr", 3) == 0) mock_push_reply("arr 16 12480 1 2 3");
+    else mock_push_reply("aro");
+}
+
+static void long_reply_tail_keeps_the_number(void)
+{
+    J_U32 dev = 0, v = 0;
+    mock_reset();
+    mock_set_responder(long_tail_responder);
+    op_device_set_factory(mock_open);
+    CHECK_EQ(PassThruOpen(NULL, &dev), STATUS_NOERROR, "Open");
+    CHECK_EQ(PassThruIoctl(dev, READ_VBATT, NULL, &v), STATUS_NOERROR,
+             "a reply with four trailing tokens is matched by its last one");
+    CHECK_EQ(v, 12480, "and its value is delivered");
+    shut(dev);
+}
+
 static void sequence_numbers_are_matched(void)
 {
     J_U32 dev = 0, ch = 0, v = 0, n = 1;
@@ -1206,10 +1244,516 @@ static void calls_are_recorded(void)
     CHECK(saw_write, "a write is recorded with protocol, flags and payload");
 }
 
+/* CLEAR_TX_BUFFER has nothing to clear: a transmit is on the wire before
+ * WriteMsgs returns. It must not empty the receive queue. */
+static void clear_tx_buffer_keeps_received(void)
+{
+    J_U32 dev = open_device(), ch = 0, count;
+    PASSTHRU_MSG got[2];
+    const uint8_t f[] = { 'a','r','6', 0x0B, 0x40, 0,0,0x30,0x00,
+                          0x00,0x00,0x07,0xE8, 0x7E, 0x00 };
+
+    PassThruConnect(dev, ISO15765, 0, 500000, &ch);
+    mock_push(f, sizeof f);
+    sleep_us(50000);
+    CHECK_EQ(PassThruIoctl(ch, CLEAR_TX_BUFFER, NULL, NULL), STATUS_NOERROR, "CLEAR_TX_BUFFER");
+    count = 2;
+    CHECK_EQ(PassThruReadMsgs(ch, got, &count, 0), STATUS_NOERROR,
+             "CLEAR_TX_BUFFER leaves received messages alone");
+    CHECK_EQ(count, 1, "the message is still there");
+
+    mock_push(f, sizeof f);
+    sleep_us(50000);
+    CHECK_EQ(PassThruIoctl(ch, CLEAR_RX_BUFFER, NULL, NULL), STATUS_NOERROR, "CLEAR_RX_BUFFER");
+    count = 2;
+    CHECK_EQ(PassThruReadMsgs(ch, got, &count, 0), ERR_BUFFER_EMPTY, "CLEAR_RX_BUFFER drops them");
+    shut(dev);
+}
+
+static long ms_between(const struct timeval *a, const struct timeval *b)
+{
+    return (b->tv_sec - a->tv_sec) * 1000L + (b->tv_usec - a->tv_usec) / 1000L;
+}
+
+/* A cable that disappears mid-session must fail every later call at once
+ * with ERR_DEVICE_NOT_CONNECTED, not run each one to its timeout. */
+static void device_loss_is_reported(void)
+{
+    J_U32 dev = open_device(), ch = 0, count = 1, v = 0;
+    PASSTHRU_MSG m;
+    struct timeval t0, t1;
+
+    PassThruConnect(dev, ISO15765, 0, 500000, &ch);
+    mock_fail_reads(1, OP_ERR_NO_DEVICE);
+    sleep_us(50000);                            /* the reader polls every 10 ms */
+    gettimeofday(&t0, NULL);
+    CHECK_EQ(PassThruReadMsgs(ch, &m, &count, 5000), ERR_DEVICE_NOT_CONNECTED,
+             "a read on an unplugged cable says so");
+    gettimeofday(&t1, NULL);
+    CHECK(ms_between(&t0, &t1) < 1000, "and says so at once, not after 5 s (%ld ms)",
+          ms_between(&t0, &t1));
+    CHECK_EQ(PassThruIoctl(dev, READ_VBATT, NULL, &v), ERR_DEVICE_NOT_CONNECTED,
+             "a command on an unplugged cable says so");
+    {
+        char fw[80], dll[80], api[80];
+        CHECK_EQ(PassThruReadVersion(dev, fw, dll, api), ERR_DEVICE_NOT_CONNECTED,
+                 "so does ReadVersion, cached or not");
+    }
+    {
+        /* Replugged and opened again without a Close in between. */
+        J_U32 dev2 = 0;
+        mock_reset();
+        mock_install_openport_responder();
+        CHECK_EQ(PassThruOpen(NULL, &dev2), STATUS_NOERROR, "Open after a lost cable reopens");
+        CHECK_EQ(PassThruIoctl(dev2, READ_VBATT, NULL, &v), STATUS_NOERROR, "and the new session works");
+        CHECK_EQ(PassThruClose(dev2), STATUS_NOERROR, "Close");
+    }
+    op_device_set_factory(NULL);
+
+    /* A transport that fails every read without saying the device is gone
+     * (a dead pty, a stalled pipe) must not spin the reader, and after a
+     * moment counts as a lost cable too. */
+    dev = open_device();
+    mock_fail_reads(1000000, OP_ERR_IO);
+    sleep_us(900000);
+    CHECK_EQ(PassThruIoctl(dev, READ_VBATT, NULL, &v), ERR_DEVICE_NOT_CONNECTED,
+             "persistent read errors mean the cable is gone");
+    PassThruClose(dev);
+    op_device_set_factory(NULL);
+}
+
+/* J2534-1 section 7.2.6: a message whose ProtocolID is not the channel's is
+ * ERR_MSG_PROTOCOL_ID. The cable would frame it for the channel's protocol
+ * and the application could not tell. */
+static void message_protocol_must_match_the_channel(void)
+{
+    J_U32 dev = open_device(), ch = 0, n = 1, id = 0, fid = 0;
+    PASSTHRU_MSG m, mask, pat;
+
+    PassThruConnect(dev, ISO15765, 0, 500000, &ch);
+    memset(&m, 0, sizeof m);
+    m.ProtocolID = CAN; m.DataSize = 12;
+    mock_clear_tx();
+    CHECK_EQ(PassThruWriteMsgs(ch, &m, &n, 100), ERR_MSG_PROTOCOL_ID,
+             "a CAN message on an ISO15765 channel is refused");
+    CHECK(!tx_contains("att6"), "and nothing goes to the cable");
+    CHECK_EQ(PassThruStartPeriodicMsg(ch, &m, &id, 100), ERR_MSG_PROTOCOL_ID,
+             "the same for a periodic message");
+    CHECK(!tx_contains("atm6"), "and nothing goes to the cable");
+
+    memset(&mask, 0, sizeof mask); memset(&pat, 0, sizeof pat);
+    mask.ProtocolID = CAN; pat.ProtocolID = 0;
+    mask.DataSize = pat.DataSize = 4;
+    CHECK_EQ(PassThruStartMsgFilter(ch, PASS_FILTER, &mask, &pat, NULL, &fid),
+             STATUS_NOERROR, "a mask or pattern's ProtocolID is ignored, as the vendor ignores it");
+    {
+        PASSTHRU_MSG fc;
+        memset(&fc, 0, sizeof fc);
+        fc.ProtocolID = CAN; fc.DataSize = 4;
+        mask.ProtocolID = pat.ProtocolID = ISO15765;
+        CHECK_EQ(PassThruStartMsgFilter(ch, FLOW_CONTROL_FILTER, &mask, &pat, &fc, &fid),
+                 ERR_MSG_PROTOCOL_ID, "a flow-control message of another protocol is refused");
+    }
+
+    m.ProtocolID = ISO15765_CH1; n = 1;
+    CHECK_EQ(PassThruWriteMsgs(ch, &m, &n, 100), STATUS_NOERROR,
+             "the J2534-2 twin of the channel's protocol is accepted");
+    shut(dev);
+}
+
+/* A specific reason set deeper down must survive the entry point's fail(). */
+static void specific_error_text_survives(void)
+{
+    J_U32 dev = open_device(), ch = 0, n = 1;
+    PASSTHRU_MSG m;
+    char err[80];
+
+    PassThruConnect(dev, CAN, 0, 500000, &ch);
+    memset(&m, 0, sizeof m);
+    m.ProtocolID = CAN; m.DataSize = 3;
+    CHECK_EQ(PassThruWriteMsgs(ch, &m, &n, 100), ERR_INVALID_MSG, "a 3-byte CAN message is refused");
+    PassThruGetLastError(err);
+    CHECK(strstr(err, "range") != NULL, "GetLastError keeps the specific reason, got \"%s\"", err);
+    shut(dev);
+}
+
+/* K is shared by channels 3 and 4, L by 7 and 8. The firmware refuses the
+ * second with `are 3` (PROTOCOL.md section 5); the standard's code for a
+ * line in use is ERR_CHANNEL_IN_USE, and nothing need reach the cable. */
+static void protocols_sharing_a_line_exclude_each_other(void)
+{
+    J_U32 dev = open_device(), k = 0, other = 0;
+
+    CHECK_EQ(PassThruConnect(dev, ISO9141, 0, 10400, &k), STATUS_NOERROR, "ISO9141 on K");
+    mock_clear_tx();
+    CHECK_EQ(PassThruConnect(dev, ISO14230, 0, 10400, &other), ERR_CHANNEL_IN_USE,
+             "ISO14230 while ISO9141 holds K");
+    CHECK(!tx_contains("ato4"), "and the cable is not asked");
+    CHECK_EQ(PassThruConnect(dev, ISO9141_CH2, 0, 10400, &other), STATUS_NOERROR, "the L line is free");
+    CHECK_EQ(PassThruConnect(dev, ISO14230_CH2, 0, 10400, &k), ERR_CHANNEL_IN_USE,
+             "ISO14230 on L while ISO9141 holds L");
+    shut(dev);
+}
+
+/* PROTOCOL.md section 10: the firmware accepts an interval of 0 and never
+ * sends the message. Reporting success for that would be a lie. */
+static void zero_interval_is_refused(void)
+{
+    J_U32 dev = open_device(), ch = 0, id = 0;
+    PASSTHRU_MSG m;
+
+    PassThruConnect(dev, ISO15765, 0, 500000, &ch);
+    memset(&m, 0, sizeof m);
+    m.ProtocolID = ISO15765; m.DataSize = 6;
+    mock_clear_tx();
+    CHECK_EQ(PassThruStartPeriodicMsg(ch, &m, &id, 0), ERR_INVALID_TIME_INTERVAL,
+             "an interval of 0 is refused");
+    CHECK(!tx_contains("atm6"), "and nothing goes to the cable");
+    shut(dev);
+}
+
+/* The K-line echo measured on the bench (PROTOCOL.md 7.9): a loopback START
+ * with the timestamp alone, the bytes without one, a loopback END with the
+ * timestamp. Delivered as Tactrix's DLL delivers it (read from its code): a
+ * START_OF_MESSAGE indication with no data, then the echoed message marked as
+ * our own. No TX_DONE: J2534-1 defines it for ISO 15765 only, and the
+ * firmware sends no 0x10 on K-line. */
+static void kline_echo_is_an_indication_and_a_message(void)
+{
+    J_U32 dev = open_device(), ch = 0, count = 4;
+    PASSTHRU_MSG got[4];
+
+    PassThruConnect(dev, ISO9141, 0, 10400, &ch);
+    {
+        const uint8_t a[] = { 'a','r','3', 0x05, 0xA0, 0x22,0xA6,0xCB,0x63 };
+        const uint8_t b[] = { 'a','r','3', 0x06, 0x20, 0x68,0x6A,0xF1,0x01,0x00 };
+        const uint8_t c[] = { 'a','r','3', 0x05, 0x60, 0x22,0xA7,0x28,0xB2 };
+        mock_push(a, sizeof a); mock_push(b, sizeof b); mock_push(c, sizeof c);
+    }
+    CHECK_EQ(PassThruReadMsgs(ch, got, &count, 300), ERR_TIMEOUT, "K-line echo read");
+    CHECK_EQ(count, 2, "the START indication, then the echoed message");
+    CHECK_EQ(got[0].RxStatus, START_OF_MESSAGE, "a START_OF_MESSAGE indication, as the vendor delivers");
+    CHECK_EQ(got[0].DataSize, 0, "with no data");
+    CHECK_EQ(got[1].RxStatus, TX_MSG_TYPE, "the echo is marked as our own transmit");
+    CHECK_EQ(got[1].DataSize, 5, "the five K-line bytes");
+    CHECK_EQ(got[1].Data[0], 0x68, "intact");
+    shut(dev);
+}
+
+/* Close while another thread issues commands: that thread must get a return
+ * code, never touch a freed transport. Under ASAN this catches the
+ * use-after-free the old ordering allowed. */
+static long g_hammer_bad;
+static void *hammer_commands(void *arg)
+{
+    J_U32 dev = *(J_U32 *)arg, v = 0;
+    int i;
+    for (i = 0; i < 5000; i++) {
+        long rc = PassThruIoctl(dev, READ_VBATT, NULL, &v);
+        if (rc == STATUS_NOERROR) continue;
+        if (rc != ERR_DEVICE_NOT_CONNECTED && rc != ERR_INVALID_DEVICE_ID) g_hammer_bad = rc;
+        break;
+    }
+    return NULL;
+}
+
+static void close_during_commands_is_safe(void)
+{
+    J_U32 dev = open_device();
+    pthread_t t;
+    g_hammer_bad = 0;
+    pthread_create(&t, NULL, hammer_commands, &dev);
+    sleep_us(20000);
+    CHECK_EQ(PassThruClose(dev), STATUS_NOERROR, "Close while another thread issues commands");
+    pthread_join(t, NULL);
+    CHECK_EQ(g_hammer_bad, 0, "the other thread saw only success or a closed-device code");
+    op_device_set_factory(NULL);
+}
+
+/* The only five-baud reply measured on a cable (Aiden-korbs, HDS on a Honda)
+ * came from an unnumbered `atw`; whether the firmware echoes the number on
+ * `arw` is unmeasured, so both forms must be accepted. */
+static void unnumbered_arw_responder(const char *line, size_t len,
+                                     const uint8_t *payload, size_t payload_len)
+{
+    char buf[64];
+    size_t copy = len < sizeof buf - 1 ? len : sizeof buf - 1;
+    (void)payload; (void)payload_len;
+    memcpy(buf, line, copy); buf[copy] = '\0';
+    if (strncmp(buf, "ati", 3) == 0) mock_push_str("ari main code version : 1.17.4877\r\n");
+    else if (strncmp(buf, "atw", 3) == 0) mock_push_str("arw3 85 8\r\n");
+    else if (strncmp(buf, "atv", 3) == 0) mock_push_reply("are 119");
+    else mock_push_reply("aro");
+}
+
+static void five_baud_reply_without_a_number(void)
+{
+    J_U32 dev = 0, ch = 0;
+    unsigned char addr = 0x33, keys[8];
+    SBYTE_ARRAY in, out;
+    char err[80];
+
+    mock_reset();
+    mock_set_responder(unnumbered_arw_responder);
+    op_device_set_factory(mock_open);
+    CHECK_EQ(PassThruOpen(NULL, &dev), STATUS_NOERROR, "Open");
+    CHECK_EQ(PassThruConnect(dev, ISO9141, 0, 10400, &ch), STATUS_NOERROR, "Connect ISO9141");
+    in.NumOfBytes = 1; in.BytePtr = &addr;
+    out.NumOfBytes = sizeof keys; out.BytePtr = keys;
+    CHECK_EQ(PassThruIoctl(ch, FIVE_BAUD_INIT, &in, &out), STATUS_NOERROR,
+             "an unnumbered arw is the init's answer");
+    CHECK_EQ(out.NumOfBytes, 2, "two key bytes");
+    CHECK(keys[0] == 85 && keys[1] == 8, "the key bytes");
+
+    /* J2534-1 Figure 27: the output array is required; nothing goes to the
+     * bus without somewhere to put the answer. */
+    mock_clear_tx();
+    CHECK_EQ(PassThruIoctl(ch, FIVE_BAUD_INIT, &in, NULL), ERR_NULL_PARAMETER,
+             "FIVE_BAUD_INIT without an output array");
+    CHECK(!tx_contains("atw"), "and no init is started");
+
+    /* A device code this build has no name for is still reported by number. */
+    CHECK_EQ(PassThruSetProgrammingVoltage(dev, 12, 12000), ERR_OEM_VOLTAGE_TOO_HIGH,
+             "the cable's own code passes through");
+    PassThruGetLastError(err);
+    CHECK(strstr(err, "ERR_OEM_VOLTAGE_TOO_HIGH") != NULL,
+          "and is named, got \"%s\"", err);
+    shut(dev);
+}
+
+/* An init reply carries no usable number, so it is matched to the command by
+ * kind instead: only a pending `aty`/`atw` may claim one. A late `ary` from
+ * an earlier init must not become the answer to a filter command. */
+static char g_stray_arf[64];
+static void *stray_init_then_arf(void *arg)
+{
+    (void)arg;
+    /* After the command is on the wire and its caller is waiting: the stale
+     * init reply, then the real one. */
+    sleep_us(20000);
+    mock_push_str("ary6 3\r\n");
+    mock_push("\xc1\xef\x8f", 3);
+    sleep_us(50000);
+    mock_push_str(g_stray_arf);
+    return NULL;
+}
+
+static void stray_init_responder(const char *line, size_t len,
+                                 const uint8_t *payload, size_t payload_len)
+{
+    char buf[64];
+    size_t copy = len < sizeof buf - 1 ? len : sizeof buf - 1;
+    unsigned ch = 0;
+    (void)payload; (void)payload_len;
+    memcpy(buf, line, copy); buf[copy] = '\0';
+    if (strncmp(buf, "ati", 3) == 0) { mock_push_str("ari main code version : 1.17.4877\r\n"); return; }
+    if (strncmp(buf, "atf", 3) == 0 && sscanf(buf + 3, "%u", &ch) == 1) {
+        const char *sp = strrchr(buf, ' ');
+        pthread_t t;
+        snprintf(g_stray_arf, sizeof g_stray_arf, "arf%u 0 %s\r\n", ch, sp ? sp + 1 : "");
+        pthread_create(&t, NULL, stray_init_then_arf, NULL);
+        pthread_detach(t);
+        return;
+    }
+    mock_push_reply("aro");
+}
+
+static void stray_init_reply_is_not_a_filter_reply(void)
+{
+    J_U32 dev = 0, ch = 0, fid = 99;
+    PASSTHRU_MSG mask, pat;
+
+    mock_reset();
+    mock_set_responder(stray_init_responder);
+    op_device_set_factory(mock_open);
+    CHECK_EQ(PassThruOpen(NULL, &dev), STATUS_NOERROR, "Open");
+    CHECK_EQ(PassThruConnect(dev, ISO15765, 0, 500000, &ch), STATUS_NOERROR, "Connect");
+    memset(&mask, 0, sizeof mask); memset(&pat, 0, sizeof pat);
+    mask.ProtocolID = pat.ProtocolID = ISO15765;
+    mask.DataSize = pat.DataSize = 4;
+    CHECK_EQ(PassThruStartMsgFilter(ch, PASS_FILTER, &mask, &pat, NULL, &fid), STATUS_NOERROR,
+             "the filter's own reply is taken, not the stray init reply");
+    CHECK_EQ(fid, 0, "filter id from the arf");
+    shut(dev);
+}
+
+/* Tactrix's DLL requires the echoed number on `ary` and `arw` (read from its
+ * code, 2026-10-07), so the firmware sends it; a stale numbered init reply is
+ * dropped like any other stale reply. */
+static char g_stale_line[48], g_real_line[48];
+static int  g_stale_raw;
+static void *stale_then_real(void *arg)
+{
+    (void)arg;
+    sleep_us(20000);
+    mock_push_str(g_stale_line);
+    if (g_stale_raw) mock_push("\x01\x02\x03", 3);
+    sleep_us(50000);
+    mock_push_str(g_real_line);
+    if (g_stale_raw) mock_push("\xc1\xef\x8f", 3);
+    return NULL;
+}
+
+static void stale_init_responder(const char *line, size_t len,
+                                 const uint8_t *payload, size_t payload_len)
+{
+    char buf[64];
+    size_t copy = len < sizeof buf - 1 ? len : sizeof buf - 1;
+    const char *sp; unsigned long seq = 0; unsigned ch = 0;
+    pthread_t t;
+    (void)payload; (void)payload_len;
+    memcpy(buf, line, copy); buf[copy] = '\0';
+    if (strncmp(buf, "ati", 3) == 0) { mock_push_str("ari main code version : 1.17.4877\r\n"); return; }
+    sp = strrchr(buf, ' ');
+    if (sp != NULL) seq = strtoul(sp + 1, NULL, 10);
+    if (strncmp(buf, "aty", 3) == 0 && sscanf(buf + 3, "%u", &ch) == 1) {
+        snprintf(g_stale_line, sizeof g_stale_line, "ary%u 3 %lu\r\n", ch, seq - 1);
+        snprintf(g_real_line, sizeof g_real_line, "ary%u 3 %lu\r\n", ch, seq);
+        g_stale_raw = 1;
+        pthread_create(&t, NULL, stale_then_real, NULL); pthread_detach(t);
+        return;
+    }
+    if (strncmp(buf, "atw", 3) == 0 && sscanf(buf + 3, "%u", &ch) == 1) {
+        snprintf(g_stale_line, sizeof g_stale_line, "arw%u 1 2 %lu\r\n", ch, seq - 1);
+        snprintf(g_real_line, sizeof g_real_line, "arw%u 85 8 %lu\r\n", ch, seq);
+        g_stale_raw = 0;
+        pthread_create(&t, NULL, stale_then_real, NULL); pthread_detach(t);
+        return;
+    }
+    mock_push_reply("aro");
+}
+
+static void stale_numbered_init_replies_are_dropped(void)
+{
+    J_U32 dev = 0, ch = 0;
+    unsigned char addr = 0x33, keys[8];
+    SBYTE_ARRAY in, out;
+    PASSTHRU_MSG req, rsp;
+
+    mock_reset();
+    mock_set_responder(stale_init_responder);
+    op_device_set_factory(mock_open);
+    CHECK_EQ(PassThruOpen(NULL, &dev), STATUS_NOERROR, "Open");
+    CHECK_EQ(PassThruConnect(dev, ISO14230, 0, 10400, &ch), STATUS_NOERROR, "Connect ISO14230");
+    memset(&req, 0, sizeof req); memset(&rsp, 0, sizeof rsp);
+    req.ProtocolID = ISO14230; req.DataSize = 4;
+    CHECK_EQ(PassThruIoctl(ch, FAST_INIT, &req, &rsp), STATUS_NOERROR, "FAST_INIT");
+    CHECK(rsp.DataSize == 3 && rsp.Data[0] == 0xC1, "the reply with the right number is taken, not the stale one");
+    in.NumOfBytes = 1; in.BytePtr = &addr;
+    out.NumOfBytes = sizeof keys; out.BytePtr = keys;
+    CHECK_EQ(PassThruIoctl(ch, FIVE_BAUD_INIT, &in, &out), STATUS_NOERROR, "FIVE_BAUD_INIT");
+    CHECK(out.NumOfBytes == 2 && keys[0] == 85 && keys[1] == 8, "the numbered arw is taken, the stale one dropped");
+    shut(dev);
+}
+
+/* Status bit 0x08 is unmeasured: Tactrix's DLL would deliver nothing, a
+ * third party has logged it on a CAN transmit indication. Until a capture
+ * settles it, every such frame is delivered as if the bit were clear. On
+ * K-line a 0x10 frame is data, as the DLL reads it. */
+static void unmeasured_status_bits_are_delivered(void)
+{
+    J_U32 dev = open_device(), can = 0, k = 0, count = 4;
+    PASSTHRU_MSG got[4];
+
+    PassThruConnect(dev, CAN, 0, 500000, &can);
+    PassThruConnect(dev, ISO9141, 0, 10400, &k);
+    {
+        const uint8_t f[] = { 'a','r','5', 0x09, 0x18, 0,0,0,1, 0x00,0x00,0x07,0xE0 };
+        const uint8_t g[] = { 'a','r','5', 0x0D, 0x08, 0,0,0,2, 0x00,0x00,0x07,0xE8, 0x55,0x66,0x77,0x88 };
+        mock_push(f, sizeof f); mock_push(g, sizeof g);
+    }
+    CHECK_EQ(PassThruReadMsgs(can, got, &count, 200), ERR_TIMEOUT, "CAN read");
+    CHECK_EQ(count, 2, "a 0x18 transmit indication and a 0x08 frame are both delivered");
+    CHECK_EQ(got[0].RxStatus, TX_MSG_TYPE | TX_DONE, "the indication keeps its meaning");
+    CHECK_EQ(got[1].Data[4], 0x55, "the frame keeps its data");
+    {
+        const uint8_t a[] = { 'a','r','3', 0x05, 0x80, 0,0,0,1 };
+        const uint8_t b[] = { 'a','r','3', 0x05, 0x10, 0x68,0x6A,0xF1,0x01 };
+        const uint8_t c[] = { 'a','r','3', 0x05, 0x40, 0,0,0,2 };
+        mock_push(a, sizeof a); mock_push(b, sizeof b); mock_push(c, sizeof c);
+    }
+    count = 4;
+    CHECK_EQ(PassThruReadMsgs(k, got, &count, 200), ERR_TIMEOUT, "K-line read");
+    CHECK_EQ(count, 2, "START indication and the message");
+    CHECK_EQ(got[1].RxStatus, 0, "a K-line 0x10 frame is data, not a transmit indication");
+    CHECK_EQ(got[1].DataSize, 4, "its four bytes are the message");
+    CHECK_EQ(got[1].Data[0], 0x68, "intact");
+    shut(dev);
+}
+
+/* ISO 15765 extended addressing: status bit 0x04 marks it and the header is
+ * five bytes, repeated on every chunk (Tactrix's DLL, read from its code). */
+static void extended_addressing_is_marked(void)
+{
+    J_U32 dev = open_device(), ch = 0, count = 4;
+    PASSTHRU_MSG got[4];
+
+    PassThruConnect(dev, ISO15765, 0, 500000, &ch);
+    {
+        const uint8_t a[] = { 'a','r','6', 0x0A, 0x84, 0,0,0,1, 0x00,0x00,0x07,0xE8, 0xF1 };
+        const uint8_t b[] = { 'a','r','6', 0x0C, 0x04, 0,0,0,2, 0x00,0x00,0x07,0xE8, 0xF1, 0x11,0x22 };
+        const uint8_t c[] = { 'a','r','6', 0x0C, 0x44, 0,0,0,3, 0x00,0x00,0x07,0xE8, 0xF1, 0x33,0x44 };
+        mock_push(a, sizeof a); mock_push(b, sizeof b); mock_push(c, sizeof c);
+    }
+    CHECK_EQ(PassThruReadMsgs(ch, got, &count, 300), ERR_TIMEOUT, "extended read");
+    CHECK_EQ(count, 2, "indication and message");
+    CHECK_EQ(got[0].RxStatus, ISO15765_FIRST_FRAME | ISO15765_ADDR_TYPE, "START indication marks the address type");
+    CHECK_EQ(got[0].DataSize, 5, "with the five-byte header");
+    CHECK_EQ(got[1].RxStatus, ISO15765_ADDR_TYPE, "the message marks the address type");
+    CHECK_EQ(got[1].DataSize, 9, "header once, then both chunks' data");
+    CHECK(got[1].Data[4] == 0xF1 && got[1].Data[5] == 0x11 && got[1].Data[7] == 0x33, "the five-byte header is stripped from the continuation");
+    shut(dev);
+}
+
+/* A Timeout of 0 gives the cable 50 ms to get a raw CAN frame onto the bus
+ * and 1 s for the other protocols, as Tactrix's DLL does (read from its
+ * code). */
+static void timeout_zero_bus_budget(void)
+{
+    J_U32 dev = open_device(), can = 0, iso = 0, n = 1;
+    PASSTHRU_MSG m;
+
+    PassThruConnect(dev, CAN, 0, 500000, &can);
+    PassThruConnect(dev, ISO15765, 0, 500000, &iso);
+    memset(&m, 0, sizeof m);
+    m.ProtocolID = CAN; m.DataSize = 8;
+    mock_clear_tx();
+    CHECK_EQ(PassThruWriteMsgs(can, &m, &n, 0), STATUS_NOERROR, "CAN write, Timeout 0");
+    CHECK(tx_contains("att5 8 0 50000 "), "50 ms budget for raw CAN");
+    m.ProtocolID = ISO15765; m.DataSize = 6; n = 1;
+    mock_clear_tx();
+    CHECK_EQ(PassThruWriteMsgs(iso, &m, &n, 0), STATUS_NOERROR, "ISO15765 write, Timeout 0");
+    CHECK(tx_contains("att6 6 0 1000000 "), "1 s budget for ISO 15765");
+    {
+        J_U32 jack = 0;
+        CHECK_EQ(PassThruConnect(dev, ISO9141_CH3, 0, 9600, &jack), STATUS_NOERROR, "the jack");
+        m.ProtocolID = ISO9141_CH3; m.DataSize = 3; n = 1;
+        mock_clear_tx();
+        CHECK_EQ(PassThruWriteMsgs(jack, &m, &n, 0), STATUS_NOERROR, "jack write, Timeout 0");
+        CHECK(tx_contains("att9 3 0 0 "), "no budget on the jack, as the vendor sends");
+    }
+    shut(dev);
+}
+
 void test_j2534(void)
 {
     SUITE("J2534 entry points");
+    stale_numbered_init_replies_are_dropped();
+    unmeasured_status_bits_are_delivered();
+    extended_addressing_is_marked();
+    timeout_zero_bus_budget();
+    stray_init_reply_is_not_a_filter_reply();
+    five_baud_reply_without_a_number();
+    clear_tx_buffer_keeps_received();
+    device_loss_is_reported();
+    message_protocol_must_match_the_channel();
+    specific_error_text_survives();
+    protocols_sharing_a_line_exclude_each_other();
+    zero_interval_is_refused();
+    kline_echo_is_an_indication_and_a_message();
+    close_during_commands_is_safe();
     sequence_numbers_are_matched();
+    long_reply_tail_keeps_the_number();
     calls_are_recorded();
     null_parameters();
     connect_and_channels();

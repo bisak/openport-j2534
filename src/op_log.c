@@ -50,25 +50,6 @@ void op_log_init(void)
     pthread_mutex_unlock(&g_lock);
 }
 
-void op_log_shutdown(void)
-{
-    pthread_mutex_lock(&g_lock);
-    if (g_log != NULL && g_log != stderr) fclose(g_log);
-    g_log = NULL;
-    g_init = 0;
-    pthread_mutex_unlock(&g_lock);
-}
-
-int op_log_enabled(void)
-{
-    int on;
-    pthread_mutex_lock(&g_lock);
-    log_init_locked();
-    on = (g_log != NULL);
-    pthread_mutex_unlock(&g_lock);
-    return on;
-}
-
 static void stamp(void)
 {
     struct timeval tv;

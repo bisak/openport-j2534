@@ -101,7 +101,7 @@ static void bounds(void)
         op_reply q;
         size_t n;
         memset(f, 0xAB, sizeof f);
-        f[0] = 'a'; f[1] = 'r'; f[2] = '3'; f[3] = 255; f[4] = 0x80;
+        f[0] = 'a'; f[1] = 'r'; f[2] = '5'; f[3] = 255; f[4] = 0x80;
         n = op_parse(f, sizeof f, &q);
         CHECK_EQ(n, sizeof f, "maximum frame consumed");
         CHECK_EQ(q.kind, OP_REPLY_FRAME, "maximum frame accepted");
@@ -192,8 +192,8 @@ static void init_reply(void)
         CHECK_EQ(n, 10, "arw consumed to its CRLF and no further");
         CHECK_EQ(r.kind, OP_REPLY_INIT, "arw is an init reply");
         CHECK_EQ(r.channel, 3, "arw channel");
-        CHECK_EQ(r.init_ntok, 2, "arw carries its tokens inline");
-        CHECK(r.init_tok[0] == 8 && r.init_tok[1] == 8, "arw key bytes");
+        CHECK_EQ(r.ntail, 2, "arw carries its tokens inline");
+        CHECK(r.tail[0] == 8 && r.tail[1] == 8, "arw key bytes");
         CHECK(r.data == NULL && r.data_len == 0, "arw has no raw bytes after the line");
         n = op_parse(arw + 10, sizeof arw - 10, &r);
         CHECK_EQ(r.kind, OP_REPLY_OK, "the aro after arw is intact");
@@ -203,7 +203,7 @@ static void init_reply(void)
         n = op_parse(bare, sizeof bare, &r);
         CHECK_EQ(n, 6, "arw with no bytes consumed");
         CHECK_EQ(r.kind, OP_REPLY_INIT, "arw with no bytes is still an init reply");
-        CHECK_EQ(r.init_ntok, 0, "arw with no bytes has no tokens");
+        CHECK_EQ(r.ntail, 0, "arw with no bytes has no tokens");
     }
     {
         const uint8_t none[] = { 'a','r','y','4',' ','0','\r','\n' };
@@ -265,8 +265,7 @@ static void resync(void)
 
 static void be32(void)
 {
-    uint8_t b[4];
-    op_wr_be32(b, 0x12345678u);
+    const uint8_t b[4] = { 0x12, 0x34, 0x56, 0x78 };
     CHECK_EQ(b[0], 0x12, "big-endian byte 0");
     CHECK_EQ(b[3], 0x78, "big-endian byte 3");
     CHECK_EQ(op_rd_be32(b), 0x12345678u, "round trip");
@@ -276,9 +275,31 @@ static void be32(void)
     }
 }
 
+/* Which channels carry a timestamp on a plain data frame: CAN and ISO 15765
+ * (5, 6) always; the K-line-shaped channels 3, 4 and the L line and jack 7-9
+ * only on START, END and transmit-indication frames (PROTOCOL.md 7.9). */
+static void timestamp_rule(void)
+{
+    CHECK_EQ(op_frame_has_timestamp(5, 0x00, 8), 1, "raw CAN data frame has a timestamp");
+    CHECK_EQ(op_frame_has_timestamp(6, 0x40, 8), 1, "ISO15765 END frame has a timestamp");
+    CHECK_EQ(op_frame_has_timestamp(3, 0x00, 8), 0, "K-line data frame has none");
+    CHECK_EQ(op_frame_has_timestamp(3, 0x40, 4), 1, "K-line END frame has one");
+    CHECK_EQ(op_frame_has_timestamp(7, 0x00, 8), 0, "L-line data frame has none either");
+    CHECK_EQ(op_frame_has_timestamp(8, 0x00, 8), 0, "ISO14230 on L: none");
+    CHECK_EQ(op_frame_has_timestamp(9, 0x00, 8), 0, "the 2.5 mm jack: none");
+    CHECK_EQ(op_frame_has_timestamp(7, 0x80, 4), 1, "L-line START frame has one");
+    /* Tactrix's DLL strips the timestamp on channels 3, 4, 7, 8 and 9 only
+     * from a START or END frame whose body is exactly four bytes; anything
+     * else is data, a transmit indication included (read from its code). */
+    CHECK_EQ(op_frame_has_timestamp(3, 0x40, 8), 0, "a K-line END with more than 4 bytes is data");
+    CHECK_EQ(op_frame_has_timestamp(3, 0x10, 4), 0, "no transmit indication on K-line");
+    CHECK_EQ(op_frame_has_timestamp(5, 0x10, 4), 1, "CAN transmit indication has one");
+}
+
 void test_frames(void)
 {
     SUITE("message frames");
+    timestamp_rule();
     layout();
     status_bits();
     truncation();

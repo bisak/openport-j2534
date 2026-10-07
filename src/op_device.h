@@ -36,11 +36,10 @@
 typedef struct {
     int          open;
     uint32_t     protocol;
-    uint32_t     flags;
-    uint32_t     baud;
 
     PASSTHRU_MSG partial;        /* in-progress reassembly */
     int          partial_active;
+    int          ext_announced;  /* the last START carried OP_STS_EXT_ADDR */
 
     uint8_t     *rq;             /* OP_RXQ_BYTES ring, allocated once, kept for the process */
     size_t       rq_head, rq_tail, rq_used;
@@ -53,7 +52,14 @@ typedef struct {
 
 typedef struct {
     op_transport    t;
-    int             open;        /* written under lock; waiters re-check it */
+    /* Written under lock; waiters re-check it. Atomic because every entry
+     * point reads it without the lock, while close writes it. */
+    atomic_int      open;
+    /* Set under lock by the reader when the transport reports the device
+     * gone, or fails every read for half a second. Waiters give up at once
+     * with OP_ERR_NO_DEVICE instead of sleeping to their deadline; the
+     * session stays open so that close still tears it down. */
+    atomic_int      lost;
 
     /* Statically initialised and never destroyed: a thread may be waiting on
      * them when the device closes. */
@@ -79,6 +85,10 @@ typedef struct {
      * stale or belongs to an unwaited command and is dropped. */
     uint32_t        seq_next;
     uint32_t        seq_pending;   /* number the waiting command carries, 0 = unnumbered */
+    /* The waiting command's verb letter. An init reply (`ary`, `arw`) carries
+     * no number that can be relied on, so it is matched by kind instead: only
+     * a pending `aty` or `atw` may claim one. */
+    char            cmd_verb;
     op_reply        reply;
     char            reply_text[192];
     uint8_t         reply_data[255];  /* raw bytes of an init reply */
@@ -109,7 +119,7 @@ J_U32 op_protocol_base(J_U32 protocol);
  * Test seam. The unit tests substitute a scripted in-memory transport so that
  * every layer above op_transport — reassembly, command/reply matching, the
  * J2534 entry points — is exercised with no cable attached. Passing NULL
- * restores the USB factory.
+ * restores the default, which honours OPENPORT_DEVICE and otherwise opens USB.
  */
 typedef op_status (*op_transport_factory)(op_transport *);
 void op_device_set_factory(op_transport_factory f);
@@ -147,8 +157,7 @@ void op_device_flush_channel(op_device *d, unsigned channel);
 
 /* Mark a channel open for a new connection, with an empty queue. Allocates
  * the queue on first use; OP_ERR_IO when that allocation fails. */
-op_status op_device_open_channel(op_device *d, unsigned channel, uint32_t protocol,
-                                 uint32_t flags, uint32_t baud);
+op_status op_device_open_channel(op_device *d, unsigned channel, uint32_t protocol);
 void      op_device_close_channel(op_device *d, unsigned channel);
 
 /* Number of messages the channel's queue has dropped since this was last

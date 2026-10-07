@@ -43,6 +43,13 @@
  * third-party drivers read this bit as J2534's START_OF_MESSAGE; on this
  * firmware it is not (PROTOCOL.md §7). */
 #define OP_STS_29BIT        0x02u
+/* Read from Tactrix's DLL (1.02.0.4868, 2026-10-07), unmeasured on a cable:
+ * on an ISO 15765 frame 0x04 marks extended addressing, with a 5-byte header
+ * (id + address) on every chunk. The DLL delivers nothing for a CAN frame or
+ * a K-line END carrying 0x08; a third party has logged 0x18 on a CAN channel,
+ * so this driver delivers such frames and logs the bit until it is measured. */
+#define OP_STS_EXT_ADDR     0x04u
+#define OP_STS_UNKNOWN_08   0x08u
 
 typedef enum {
     OP_REPLY_INCOMPLETE = 0, /* need more bytes before this can be decided */
@@ -71,18 +78,13 @@ typedef struct {
 
     /* Numeric tokens after a text reply's fixed fields, in order. The device
      * echoes the sequence number a command carried as the LAST of them
-     * (PROTOCOL.md section 3); for `are` the first may be a detail value.
-     * The device layer, which knows whether the command was numbered, decides
+     * (PROTOCOL.md section 3); for `are` the first may be a detail value, and
+     * for `arw<ch> <b> <b> ...` they are the five-baud key bytes, on the line
+     * itself rather than as raw bytes after it (`data` is NULL then). The
+     * device layer, which knows whether the command was numbered, decides
      * which is which. */
-    unsigned      ntail;
-    uint32_t      tail[3];
-
-    /* OP_REPLY_INIT from `arw<ch> <b> <b> ...`: the ECU's bytes arrive as
-     * decimal tokens on the line itself, not as raw bytes after it. When the
-     * command was numbered the last token is the echoed sequence number; the
-     * device layer, which knows, strips it. `data` is NULL for this shape. */
-    unsigned      init_ntok;
-    uint32_t      init_tok[8];
+    unsigned      ntail;         /* tokens stored, never more than fit */
+    uint32_t      tail[8];
 
     /* OP_REPLY_INFO: points into the caller's buffer, not NUL-terminated */
     const char   *text;
@@ -105,15 +107,15 @@ typedef struct {
  */
 size_t op_parse(const uint8_t *buf, size_t len, op_reply *out);
 
+/* Whether a frame body (everything after the status byte) starts with the
+ * 4-byte timestamp. CAN: always. K-line: only on START/END/TX_IND frames. */
+int op_frame_has_timestamp(unsigned channel, uint8_t status, size_t body_len);
+
 /*
  * Find the next plausible reply boundary at or after buf[1], for resynchronising
  * after the device and host disagree about a binary payload length. Returns the
  * offset of the candidate, or len when there is none.
  */
-/* Whether a frame body (everything after the status byte) starts with the
- * 4-byte timestamp. CAN: always. K-line: only on START/END/TX_IND frames. */
-int op_frame_has_timestamp(unsigned channel, uint8_t status, size_t body_len);
-
 size_t op_resync_offset(const uint8_t *buf, size_t len);
 
 /* ---- Command encoders -------------------------------------------------
@@ -176,8 +178,9 @@ size_t op_cmd_five_baud(char *out, size_t out_sz, unsigned ch,
  * back in its reply (`ata 2` -> `aro 2`, `atr 16 3` -> `arr 16 108 3`), which
  * is how a reply is tied to the command it answers instead of by position
  * alone. op_cmd_is_numbered says whether a verb takes one: every verb but
- * `ati`, which ignores it. `aty`/`atw` echo it on failure (`are 7 10`); their
- * success reply `ary` has not been measured with one, so the device layer
+ * `ati`, which ignores it. `aty`/`atw` echo it on failure (`are 7 10`), and
+ * Tactrix's DLL requires it on `ary` and `arw` (read from its code); the one
+ * `arw` seen on a cable answered an unnumbered `atw`, so the device layer
  * accepts an init reply with or without it.
  * op_cmd_number inserts " <seq>" before the terminating CR LF of a line of
  * `len` bytes and returns the new length, or 0 if it would not fit.
@@ -197,8 +200,7 @@ unsigned op_filter_msg_count(uint32_t filter_type);
  * including the NUL. Returns 1 on success, 0 if no delimiter was found. */
 int op_parse_version(const char *text, size_t text_len, char *out, size_t out_sz);
 
-/* Big-endian helpers — the device is big-endian on the wire throughout. */
+/* The device is big-endian on the wire throughout. */
 uint32_t op_rd_be32(const uint8_t *p);
-void     op_wr_be32(uint8_t *p, uint32_t v);
 
 #endif /* OP_PROTO_H */

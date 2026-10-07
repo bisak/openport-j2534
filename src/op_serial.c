@@ -26,6 +26,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,7 +59,8 @@ static op_status wait_ready(int fd, short events, unsigned timeout_ms)
     p.revents = 0;
 
     do {
-        r = poll(&p, 1, (int)timeout_ms);
+        /* poll() takes an int; a negative value would wait forever. */
+        r = poll(&p, 1, timeout_ms > INT_MAX ? INT_MAX : (int)timeout_ms);
     } while (r < 0 && errno == EINTR);
 
     if (r < 0)  return from_errno(errno);
@@ -143,7 +145,7 @@ static void ser_close(op_transport *t)
 }
 
 static const op_transport_ops g_serial_ops = {
-    "serial", ser_write, ser_read, ser_close
+    ser_write, ser_read, ser_close
 };
 
 op_status op_serial_open(op_transport *out, const char *path)

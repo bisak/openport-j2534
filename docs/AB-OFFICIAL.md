@@ -128,7 +128,8 @@ The sweep skips these three so that the DLL's process survives.
 
 | Case | Tactrix's DLL | This driver |
 |---|---|---|
-| A message whose `ProtocolID` differs from its channel's | picks the firmware channel from the message: CAN on an ISO 15765 channel goes out as `att5`; ISO 15765 on a CAN channel returns `ERR_INVALID_PROTOCOL_ID` | sends on the channel it was written to |
+| A message whose `ProtocolID` differs from its channel's | picks the firmware channel from the message: CAN on an ISO 15765 channel goes out as `att5`; ISO 15765 on a CAN channel returns `ERR_INVALID_PROTOCOL_ID` | refuses it with `ERR_MSG_PROTOCOL_ID`, the standard's code |
+| A filter mask or pattern whose `ProtocolID` differs from its channel's | ignores the id: an ISO 15765 mask on a CAN channel goes out as `atf5`, a CAN mask on an ISO 15765 channel as `atf6`, both 0 (sweep, 2026-10-07) | the same; only the flow-control message's `ProtocolID` is checked, as the DLL's code checks it |
 | Raw CAN and ISO 15765 channels both open | every channel-5 frame goes to the ISO 15765 channel, none to the CAN channel | channel-5 frames stay on the CAN channel |
 | `LOOPBACK` on ISO 15765: order of echo and TxDone | TxDone first | wire order (the timestamps show the true order) |
 

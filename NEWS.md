@@ -1,5 +1,29 @@
 # Release notes
 
+## Unreleased
+
+Fixes
+
+- A cable that disappears mid-session now fails every later call at once with `ERR_DEVICE_NOT_CONNECTED` instead of running each one to its timeout. A transport that fails every read for half a second counts as a lost cable, and the reader thread no longer spins on it.
+- `PassThruClose` on one thread while a command was queued behind it on another could free the transport under that command. The teardown now waits for the command, which returns a closed-device code.
+- `CLEAR_TX_BUFFER` emptied the receive queue. There is no transmit queue to clear; it now leaves received messages alone.
+- A five-baud init whose `arw` reply carried no sequence number timed out. Both forms are accepted, and an init reply is matched to the command by kind: a late `ary` or `arw` can no longer be taken as the answer to whatever command came next.
+- With `LOOPBACK` on a K-line channel, the echo was preceded by an empty `TX_DONE` indication. It is now a `START_OF_MESSAGE` indication, as Tactrix's driver delivers it, followed by the echoed message marked `TX_MSG_TYPE`.
+- Frames on the L-line and jack channels (7-9) were laid out as CAN frames. They follow the K-line layout, as channels 3 and 4 do.
+- A reply with more than three trailing numbers read past the parser's token array.
+- `PassThruGetLastError` had no text after a failed `READ_VBATT` or `READ_PROG_VOLTAGE`, and lost the specific reason (a size range, a dead K-line) behind the entry point's generic one. The cable's `ERR_OEM_VOLTAGE_*` codes are named; a code with no name is reported by number.
+- A `PassThruConnect` that ran out of memory after the cable had opened the channel left it open on the cable.
+- The serial transport could wait forever on a timeout above 2^31 ms, and a zero-length USB packet was reported as data.
+
+Changes
+
+- Return codes the standard names: a message whose `ProtocolID` is not the channel's protocol is refused with `ERR_MSG_PROTOCOL_ID`, for transmits, periodic messages and a filter's flow-control message, as the vendor driver checks them, while a mask or pattern's `ProtocolID` is ignored, as it ignores it (Tactrix's driver reroutes a mismatched transmit by protocol); connecting a protocol whose line another open channel holds (ISO 9141 and ISO 14230 on K, their twins on L) returns `ERR_CHANNEL_IN_USE` without asking the cable, which answers `are 3`; a periodic message with an interval of 0, which the cable accepts and never sends, returns `ERR_INVALID_TIME_INTERVAL`; `FIVE_BAUD_INIT` without an output array returns `ERR_NULL_PARAMETER` before anything reaches the bus.
+- `PassThruClose` returns the reset's failure code when `atz` did not reach the cable, since a pin may still carry voltage. The session is torn down either way.
+- `PassThruReadMsgs` waits once per message for the time that is left instead of in 20 ms slices.
+- Read from Tactrix's driver code and applied here: ISO 15765 extended addressing is marked (`ISO15765_ADDR_TYPE`, status bit `0x04`, a 5-byte header on every chunk); on the K-line channels only a START or END frame of exactly four bytes carries a timestamp, and a `0x10` frame there is data; a `Timeout` of 0 gives a raw CAN frame a 50 ms bus budget and a jack transmit none; a stale numbered `ary` or `arw` is discarded. A frame with status bit `0x08`, which the vendor driver would drop and whose meaning is unmeasured, is delivered and logged.
+- `PassThruOpen` after a lost cable closes the dead session itself, so an application need not call `PassThruClose` first; `PassThruReadVersion` reports the loss like every other call.
+- Protocol notes: `atx` and `atp 5 2` are the vendor driver's firmware-update entry; neither is ever sent by this driver. A cable in its bootloader (`0403:cc4b`) or enumerated as storage with a microSD card in (`0403:cc4c`) is named as such by `PassThruGetLastError` instead of "no OpenPort found".
+
 ## 0.3.2 (2026-10-03)
 
 The library is unchanged apart from its version number.

@@ -11,7 +11,8 @@
 
 static _Thread_local char g_text[OP_ERR_TEXT_MAX];
 
-void op_err_clear(void) { g_text[0] = '\0'; }
+void op_err_clear(void)  { g_text[0] = '\0'; }
+int  op_err_is_set(void) { return g_text[0] != '\0'; }
 
 void op_err_set(const char *fmt, ...)
 {
@@ -57,6 +58,8 @@ const char *op_err_name(long code)
     case ERR_INVALID_BAUDRATE:      return "ERR_INVALID_BAUDRATE";
     case ERR_INVALID_DEVICE_ID:     return "ERR_INVALID_DEVICE_ID";
     case ERR_INIT_FAILED:           return "ERR_INIT_FAILED";
+    case ERR_OEM_VOLTAGE_TOO_HIGH:  return "ERR_OEM_VOLTAGE_TOO_HIGH";
+    case ERR_OEM_VOLTAGE_TOO_LOW:   return "ERR_OEM_VOLTAGE_TOO_LOW";
     default:                        return "ERR_UNKNOWN";
     }
 }

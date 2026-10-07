@@ -131,6 +131,12 @@ ar<verb> <args>\r\n                                    ASCII reply
 
 ## 3. Replies and sequence numbers **[V]**
 
+Tactrix's DLL matches every reply to its command by the trailing number
+alone, never by the letter, and requires the number on `arw` (`arw<ch> <b>
+<b> <n>`) and `ary` (`ary<ch> <len> <n>` + bytes) too (read from its code,
+2026-10-07) **[P]**. The one `arw` seen on a cable answered an unnumbered `atw`, so
+this driver accepts an init reply with or without the number.
+
 | Reply | Meaning |
 |---|---|
 | `aro` | success, no value |
@@ -141,8 +147,8 @@ ar<verb> <args>\r\n                                    ASCII reply
 | `arf<ch> <filter_id>` | filter installed |
 | `arg<ch> <param> <value>` | a configuration value |
 | `arm<ch> <id>` | periodic message started |
-| `arw<ch> <b> <b> …` | five-baud init result: the ECU's key bytes, in decimal **[P]** |
-| `ary<ch> <n>` + `n` raw bytes | fast init result: the ECU's response **[P]** |
+| `arw<ch> <b> <b> [<seq>]` | five-baud init result: the ECU's key bytes, in decimal, then the echoed number **[P]** |
+| `ary<ch> <n> [<seq>]` + `n` raw bytes | fast init result: the ECU's response **[P]** |
 
 The `arw` form was measured by a third party with Honda HDS on a 2005 Honda
 (`Aiden-korbs/openport2-winarm-j2534`); the `ary` form is the reading of the
@@ -191,7 +197,7 @@ no reply and do not exist: `atb atd ate ath atj atq atu`.
 | `atk<ch>` | `<filter_id>` | removes a filter; `-1` removes all of them |
 | `atg<ch>` | `<param>` | reads a configuration value (§8) |
 | `ats<ch>` | `<param> <value>` | writes a configuration value (§8) |
-| `atm<ch>` | `<interval_us> 0 <txflags> <len>` + payload | starts a periodic message; replies `arm<ch> <id>` |
+| `atm<ch>` | `<interval_us> 0 <txflags> <len>` + payload | starts a periodic message; replies `arm<ch> <id>`. The `0` is a second interval Tactrix's DLL fills from bits 16-30 of `TimeInterval` when bit 31 is set (read from its code); what the firmware does with it is unmeasured |
 | `atn<ch>` | `<msg_id>` | stops a periodic message |
 | `atl<ch>` | | stops every periodic message on the channel |
 | `atr` | ` <pin>` | reads a pin voltage in millivolts (§8) |
@@ -384,6 +390,8 @@ does, followed by the data. K-line frames differ (§7.9).
 | `0x20` | LOOPBACK: an echo of our own transmit (§7.7) |
 | `0x10` | transmit indication (§7.5) |
 | `0x02` | the CAN id is 29-bit (§7.4) |
+| `0x04` | ISO 15765 extended addressing: the header is 5 bytes, id and address, on every chunk (read from Tactrix's DLL, 2026-10-07; not seen on a cable) **[P]** |
+| `0x08` | Tactrix's DLL delivers nothing for a CAN frame or a K-line END that carries it (read from the DLL) **[P]**; one third-party log shows `0x18` on a CAN channel. What the firmware means by it is unknown, so this driver delivers such frames and logs the bit |
 
 ### 7.3 What the bits mean on a live bus **[V]**
 
@@ -432,7 +440,9 @@ read it as J2534's `START_OF_MESSAGE`, which would make `0x12` "transmit done
 and start of a message". The driver passes it on as `CAN_29BIT_ID` on CAN
 channels. Tactrix's changelog for firmware 1.44 ("return CAN_29BIT_ID flag on
 appropriate read results") agrees. `0x44` (END with `RX_BREAK`) is a
-third-party claim, not measured here.
+third-party relabel: the value entered `NikolaKozina/j2534` in 2022 as the END
+of an extended-addressing CAN message, and no source records a K-line frame
+carrying it.
 
 ### 7.5 The transmit indication **[V]**
 
@@ -523,18 +533,35 @@ On channels 3 and 4 (and probably 7–9) frames are not laid out like CAN frames
 | `0x40` end, `0x60` loopback end | the 4-byte timestamp, no data |
 | `0x10` transmit indication | the 4-byte timestamp |
 
-Every implementation that has run K-line on this cable describes this:
+Every implementation that has run K-line on this cable describes this, but
+they are one lineage: the rule was written into `NikolaKozina/j2534` in 2018
+("Tested DS2 & SSM on K-line"), and `dschultzca`, `Aiden-korbs`, `tuneforge`,
+`opta-j2534-rs` and `emdzej/j2534` inherit it; `emdzej`'s disassembly of the
+DLL covers transmit and configuration, not the receive layout (checked
+2026-10-07). What stands on its own is that five hardware sessions (Subaru SSM
+and BMW DS2 in 2018, a BMW E46 cluster, a 2005 Honda CR-V, a 2007 Honda
+CBR1000RR, Subaru Forester and Legacy) copy data from the byte after the
+status and get checksum-valid ECU frames, so a `0x00` data frame carries no
+timestamp. That an END frame carries one rests on `emdzej`, which finalises a
+message only on a non-zero END timestamp and worked on the E46. A received
+START frame is unobserved: `opta-j2534-rs` appends its body to the data and
+worked, so on the CBR it was empty or absent. No repository holds a literal
+capture of a received K-line frame; the fixtures are hand-written. Treating
+K-line like CAN would eat the first four bytes of every K-line message.
 
-- `emdzej/j2534` (firmware 1.17.4877, from a disassembly of the DLL): "K-line
-  packets have no timestamp";
-- `opta-j2534-rs` (verified on a Honda PGM-FI ECM): "the firmware does not insert
-  a timestamp; payload begins immediately after kind", and "the RxEnd payload is
-  a 4-byte free-running timestamp, not user data";
-- `tuneforge` and the `dschultzca` family.
+Every one of those sessions, and Tactrix's own `klogger` sample, connected
+with `ISO9141_NO_CHECKSUM` and checksummed in the application. How the cable
+delivers or checks the checksum byte with the flag clear is unobserved
+anywhere; Tactrix's DLL itself neither strips nor checks a checksum and
+produces no checksum-error status (read from its code).
 
-One of them has a test fixture with an END frame that has no body at all; the
-parser accepts both. Treating K-line like CAN would eat the first four bytes of
-every K-line message.
+The rule Tactrix's DLL applies (read from its code, 2026-10-07) **[P]**: on channels
+5 and 6 every frame starts with the timestamp; on 3, 4, 7, 8 and 9 only a
+START or END frame whose body is exactly four bytes does, and every other
+frame, a transmit indication included, is data. A K-line START, a loopback
+one included, is delivered as a `START_OF_MESSAGE` indication with no data;
+an END delivers the message, `TX_MSG_TYPE` when the END carries `0x20`. This
+driver applies the same rule.
 
 The echo rows are measured (bench, nothing on pin 7, 2026-09-24). A transmit
 with `LOOPBACK` on, no init first:
@@ -834,9 +861,35 @@ On a 2009 Audi 1.9 TDI, on 2026-09-13:
 | The K-line frame layout (§7.9), the five-baud `arw` reply, a successful fast-init `ary` | one K-line session recorded with `car_capture.py --kline`, or a bench OBD simulator that speaks ISO 9141-2 / KWP2000 |
 | Whether the L line and the 2.5 mm jack carry data on channels 7–9 | an L-line ECU or an Innovate device |
 | Whether the firmware drives L on channels 3 and 4 | a scope on pin 15 during a five-baud init |
-| How extended addressing (`ISO15765_ADDR_TYPE`) is marked on receive | an ECU that uses it |
+| How extended addressing (`ISO15765_ADDR_TYPE`) is marked on receive | Tactrix's DLL reads status `0x04` and a 5-byte header (§7.2); a capture from an ECU that uses it would confirm it |
 | The reattach at close on Linux (§1), as this driver does it | `examples/op_smoke` twice on a Linux machine, then `ls /dev/ttyACM*` |
-| What `atx` and `atp` do | unknown; Tactrix's DLL sends neither |
+| What `atp` does beyond the update entry below | unknown; Tactrix's DLL sends it only there |
+
+**`atx` restarts the cable into its bootloader.** Read from Tactrix's DLL
+(1.02.0.4868, unpacked in memory on the A/B rig, 2026-10-07): its firmware
+updater sends `atp 5 2` with two raw bytes, reads a seed from `arp 5 4` plus
+four bytes, and then sends `atx <n>`; the cable re-enumerates as USB
+`0403:cc4b` ("Openport 2.0 Bootloader") and speaks `tbi`/`tbp`/`tbw`/`tbx`,
+answering `tro` or `tre <code>`. `atp <service> <len> <n>` + up to 128 bytes
+is answered `arp <service> <len> <n>` + bytes; the DLL exposes it as
+`TX_IOCTL_APP_SERVICE` (input `{u32 len; u32 service; u8 data[]}`, output
+`{u32 len; u8 data[]}`) and uses only service 5, for the update seed. The
+DLL carries its firmware as an encrypted
+flash file (1.17.4869, older than the cable's 1.17.4877) and only flashes a
+cable that reports an older version; a newer 1.17.4955 has been seen in the
+wild. This driver never sends `atx`; a tool that does must expect the cable to
+disappear. `atp <service> <len>` + bytes is an application-service request
+answered `arp <service> <len>` + bytes (`TX_IOCTL_APP_SERVICE` in Tactrix's
+header); the updater uses service 5, and what the other services do is
+unknown. The MCU is an LPC2364 whose update log prints code protection
+`87654321`, NXP's CRP2 pattern, so its flash cannot be read out over ISP
+either (forum update logs; inferred). With a microSD card inserted the cable
+enumerates as `0403:cc4c`, a storage composite with no serial link (one user
+report, 2009, [P]); the driver names that case. No firmware image, of the
+cable or of a clone, is public: clones use the same LPC23xx and answer `ati`
+with the same string, and repair forums describe the DLL's blob as an
+incomplete image that cannot revive a wiped cable (unverified; 80,280 bytes
+against a 128 KB part is consistent with an application region alone).
 
 Settled, for anyone checking: Tactrix's five-argument forms are accepted and the
 trailing number echoed (`ato6 0 500000 0 1` → `aro 1`); two-digit protocol
@@ -886,6 +939,8 @@ template, and the readable pins are 8, 12, 16 and 17 (all from
 | SAE J2534-1 DEC2004 (04.04) §7.2.5, §8.5–8.7, A.2–A.4 | what an application must be given for indications and segmented replies; the `RxStatus` bits; message size limits |
 | Vehicle and bench sessions: 2026-06-17 (a chassis controller, ISO 15765), 2026-09-13 (2012 VW Caddy; 2009 Audi 1.9 TDI), 2026-09-16 and 2026-09-24 (bench chassis ECU) | frame sequences, status bits, the transmit indication, raw CAN, periodic timing, `SNIFF_MODE`, long-reply chunking, the ISO 15765 loopback echo |
 | `op20pt32.dll` 1.02.0.4868 under emulation and on the cable ([AB-OFFICIAL.md](AB-OFFICIAL.md)) | every command Tactrix sends, sequence numbers, `atm`, the chunk layout, `tbi`, `READ_PROG_VOLTAGE`'s pin argument |
+| `op20pt32.dll` 1.02.0.4868 unpacked in memory (2026-10-07) | the verbs the DLL can send (a c f g i k l m n o p r s t v w x y z), the update entry `atp 5 2` / `atx`, the bootloader's USB id and verbs (§12); its reply parser: numbers on `arw`/`ary`, the K-line timestamp rule, status `0x04` and `0x08`, the 5-byte extended-addressing header, no size or interval checks, a 50 ms bus budget for a raw CAN `Timeout` 0, `CLEAR_TX_BUFFER` a no-op, `ERR_TIMEOUT` on a lost cable |
+| Tactrix `openport2.inf`; forums.openecu.org threads 4978 and 5432 (update logs); github.com/Natzirt-BK/subaru-ecu-tools-linux | the bootloader and storage USB ids, the MCU part id and CRP state, firmware 1.17.4955 |
 | Tactrix `openport2_setup_1024820.exe`: `samples/common/j2534_tactrix.h`, `samples/canlogger/canlogger.cpp`, `samples/klogger/klogger.cpp` | Tactrix's header (private IOCTLs, J2534-2 ids, `SNIFF_MODE`, OEM error codes, pin numbers), and Tactrix's own programs discarding `START_OF_MESSAGE` messages |
 | Tactrix EcuFlash changelog (firmware 1.41, 1.42, 1.44) | K-line echoes follow `LOOPBACK`; transmit-done messages carry timestamps; `CAN_29BIT_ID` on received messages |
 | github.com/emdzej/j2534 @ `35aae08` (`packages/core/src/parser.ts`, `commands.ts`, `AGENTS.md`) | an independent reading of every status byte, CAN and K-line, from a disassembly of the DLL |

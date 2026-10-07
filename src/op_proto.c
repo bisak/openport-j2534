@@ -4,6 +4,7 @@
  */
 #include "op_proto.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -11,14 +12,6 @@ uint32_t op_rd_be32(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
            ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
-}
-
-void op_wr_be32(uint8_t *p, uint32_t v)
-{
-    p[0] = (uint8_t)(v >> 24);
-    p[1] = (uint8_t)(v >> 16);
-    p[2] = (uint8_t)(v >> 8);
-    p[3] = (uint8_t)v;
 }
 
 static int is_digit(uint8_t c) { return c >= '0' && c <= '9'; }
@@ -59,8 +52,8 @@ static void parse_tail(const char *body, size_t n, size_t i, op_reply *out)
         got = parse_u32(body + i, n - i, &v);
         if (got == 0) return;
         i += got;
-        if (out->ntail < 3) out->tail[out->ntail] = v;
-        out->ntail++;
+        if (out->ntail < sizeof out->tail / sizeof out->tail[0])
+            out->tail[out->ntail++] = v;
     }
 }
 
@@ -182,31 +175,24 @@ static void parse_ascii(const char *body, size_t n, op_reply *out)
         if (got == 0) return;
         i += got;
         i += skip_spaces(body + i, n - i);
-        if (parse_u32(body + i, n - i, &count) == 0) return;
-        if (count > 255) return;
+        got = parse_u32(body + i, n - i, &count);
+        if (got == 0 || count > 255) return;
+        i += got;
         out->kind = OP_REPLY_INIT;
         out->channel = ch;
         out->a = count;
+        parse_tail(body, n, i, out);            /* the echoed number, if any */
         return;
     }
 
     case 'w': {                                 /* arw<ch> <b> <b> ... [<seq>] */
-        uint32_t ch = 0, v = 0;
-        size_t got;
-        got = parse_u32(body + i, n - i, &ch);
+        uint32_t ch = 0;
+        size_t got = parse_u32(body + i, n - i, &ch);
         if (got == 0) return;
         i += got;
-        out->init_ntok = 0;
-        for (;;) {
-            i += skip_spaces(body + i, n - i);
-            got = parse_u32(body + i, n - i, &v);
-            if (got == 0) break;
-            i += got;
-            if (out->init_ntok < sizeof out->init_tok / sizeof out->init_tok[0])
-                out->init_tok[out->init_ntok++] = v;
-        }
         out->kind = OP_REPLY_INIT;
         out->channel = ch;
+        parse_tail(body, n, i, out);
         return;
     }
 
@@ -229,9 +215,12 @@ static void parse_ascii(const char *body, size_t n, op_reply *out)
  */
 int op_frame_has_timestamp(unsigned channel, uint8_t status, size_t body_len)
 {
-    if (channel != 3 && channel != 4) return body_len >= 4;
-    if ((status & (OP_STS_START | OP_STS_END | OP_STS_TX_IND)) == 0) return 0;
-    return body_len >= 4;
+    /* 5 and 6 are CAN and ISO 15765. On 3, 4, 7, 8 and 9 Tactrix's DLL strips
+     * a timestamp only from a START or END frame whose body is exactly four
+     * bytes; everything else is data (read from its code, 2026-10-07; the
+     * echoes measured in PROTOCOL.md 7.9 fit). */
+    if (channel == 5 || channel == 6) return body_len >= 4;
+    return (status & (OP_STS_START | OP_STS_END)) != 0 && body_len == 4;
 }
 
 size_t op_parse(const uint8_t *buf, size_t len, op_reply *out)
@@ -289,8 +278,7 @@ size_t op_parse(const uint8_t *buf, size_t len, op_reply *out)
         for (i = 2; i + 1 < len; i++) {
             if (buf[i] == '\r' && buf[i + 1] == '\n') {
                 parse_ascii((const char *)buf + 2, i - 2, out);
-                if (out->kind == OP_REPLY_INIT && out->init_ntok == 0
-                    && buf[2] == 'y') {
+                if (out->kind == OP_REPLY_INIT && buf[2] == 'y') {
                     /* `ary` announces how many raw response bytes follow the
                      * line. They are part of this reply, not the start of the
                      * next one; wait until all of them are in. `arw` carries
@@ -333,10 +321,7 @@ size_t op_resync_offset(const uint8_t *buf, size_t len)
 
 /* snprintf returns the length it *would* have written; treat truncation and
  * encoding errors alike as failure so no caller ever transmits a partial line. */
-static size_t emit(char *out, size_t out_sz, const char *fmt, ...)
-    __attribute__((format(printf, 3, 4)));
-
-#include <stdarg.h>
+__attribute__((format(printf, 3, 4)))
 static size_t emit(char *out, size_t out_sz, const char *fmt, ...)
 {
     va_list ap;
