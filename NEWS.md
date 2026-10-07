@@ -1,6 +1,6 @@
 # Release notes
 
-## Unreleased
+## 0.4.0 (2026-10-07)
 
 Fixes
 
