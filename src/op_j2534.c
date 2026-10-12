@@ -232,6 +232,10 @@ long PassThruOpen(const void *pName, J_U32 *pDeviceID)
         case OP_ERR_ACCESS:
             code = ERR_DEVICE_IN_USE;
             break;
+        case OP_ERR_STALLED:
+            code = ERR_DEVICE_NOT_CONNECTED;
+            detail = "The OpenPort takes no USB data; its firmware has stopped. Replug its USB.";
+            break;
         case OP_ERR_PROTOCOL:
             /* Found and opened, but it will not synchronise. Distinct from
              * "not connected" so the user debugs the link, not the cable. */

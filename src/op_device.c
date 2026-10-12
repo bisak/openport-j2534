@@ -39,6 +39,7 @@ long op_status_to_j2534(op_status st)
     case OP_ERR_OVERFLOW:      return ERR_BUFFER_OVERFLOW;
     case OP_ERR_IO:            return ERR_FAILED;
     case OP_ERR_PROTOCOL:      return ERR_FAILED;
+    case OP_ERR_STALLED:       return ERR_DEVICE_NOT_CONNECTED;
     default:                   return ERR_FAILED;
     }
 }
@@ -498,7 +499,9 @@ static op_status sync_device(op_device *d)
 
     /* Terminate a partial line a previous session may have left in the
      * device's parser, as the vendor DLL does before its first command. */
-    (void)op_write(&d->t, (const uint8_t *)"\r\n\r\n", 4, 200);
+    st = op_write(&d->t, (const uint8_t *)"\r\n\r\n", 4, 200);
+    if (st == OP_ERR_STALLED) return st;
+    st = OP_ERR_TIMEOUT;
 
     for (attempt = 0; attempt < 3 && st == OP_ERR_TIMEOUT; attempt++) {
         size_t n = op_cmd_reset(line, sizeof line);

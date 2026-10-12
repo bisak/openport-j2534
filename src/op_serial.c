@@ -88,6 +88,7 @@ static op_status ser_write(op_transport *t, const uint8_t *buf, size_t len,
     while (sent < len) {
         ssize_t n;
         op_status st = wait_ready(s->fd, POLLOUT, timeout_ms);
+        if (st == OP_ERR_TIMEOUT) return OP_ERR_STALLED;
         if (st != OP_OK) return st;
 
         n = write(s->fd, buf + sent, len - sent);

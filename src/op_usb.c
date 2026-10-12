@@ -206,6 +206,9 @@ static op_status usb_write(op_transport *t, const uint8_t *buf, size_t len,
                 sent += (size_t)moved;
                 continue;
             }
+            /* The firmware NAKs every OUT packet. Seen 2026-10-12 with the IN
+             * queue empty; a USB reset did not clear it, a replug did. */
+            if (r == LIBUSB_ERROR_TIMEOUT) return OP_ERR_STALLED;
             return from_libusb(r);
         }
         if (moved <= 0) return OP_ERR_IO;

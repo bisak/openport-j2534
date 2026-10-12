@@ -1171,6 +1171,21 @@ static void long_reply_tail_keeps_the_number(void)
     shut(dev);
 }
 
+/* A cable whose firmware NAKs every OUT packet is not a corrupt stream: the
+ * open must say the device takes no data. */
+static void stalled_cable_is_named(void)
+{
+    J_U32 dev = 0;
+    char err[80];
+    mock_reset();
+    mock_install_openport_responder();
+    op_device_set_factory(mock_open);
+    mock_fail_writes(10, OP_ERR_STALLED);
+    CHECK_EQ(PassThruOpen(NULL, &dev), ERR_DEVICE_NOT_CONNECTED, "Open on a stalled cable");
+    CHECK_EQ(PassThruGetLastError(err), STATUS_NOERROR, "GetLastError");
+    CHECK(strstr(err, "takes no USB data") != NULL, "the error names the stall, not a corrupt stream");
+}
+
 static void sequence_numbers_are_matched(void)
 {
     J_U32 dev = 0, ch = 0, v = 0, n = 1;
@@ -1752,6 +1767,7 @@ void test_j2534(void)
     zero_interval_is_refused();
     kline_echo_is_an_indication_and_a_message();
     close_during_commands_is_safe();
+    stalled_cable_is_named();
     sequence_numbers_are_matched();
     long_reply_tail_keeps_the_number();
     calls_are_recorded();

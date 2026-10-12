@@ -1,5 +1,11 @@
 # Release notes
 
+## Unreleased
+
+Fixes
+
+- A cable whose firmware stops taking USB data (every bulk OUT write times out with nothing sent) was reported as "not answering the protocol correctly (stream may be corrupt)". `PassThruOpen` now returns `ERR_DEVICE_NOT_CONNECTED` with "The OpenPort takes no USB data; its firmware has stopped. Replug its USB." and stops after the first refused write instead of retrying the reset three times. Seen on 2026-10-12: the IN queue was empty and a USB port reset did not clear it; a replug did. What puts the firmware in that state is not known.
+
 ## 0.4.0 (2026-10-07)
 
 Fixes

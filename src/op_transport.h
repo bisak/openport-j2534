@@ -22,7 +22,8 @@ typedef enum {
     OP_ERR_MASS_STORAGE,  /* enumerated as USB storage: microSD is inserted */
     OP_ERR_PARAM,         /* bad argument from our own caller */
     OP_ERR_OVERFLOW,      /* would not fit in the caller's buffer */
-    OP_ERR_PROTOCOL       /* device is present but will not talk sense */
+    OP_ERR_PROTOCOL,      /* device is present but will not talk sense */
+    OP_ERR_STALLED        /* device takes no bytes: a write timed out with nothing sent */
 } op_status;
 
 typedef struct op_transport op_transport;
