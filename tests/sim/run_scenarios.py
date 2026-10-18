@@ -427,24 +427,24 @@ def s_periodic_keepalive():
     check(c is not None and mid.value in c.periodic and c.periodic[mid.value][0] == 0.05,
           "the firmware holds it with a 50 ms interval (sent as 50000 us)")
 
-    sim.tx_times.clear()
+    sim.tx_log.clear()
     time.sleep(0.6)
     inbuf = (PASSTHRU_MSG * 32)(); cnt = U32(32)
     rc = d.PassThruReadMsgs(ch, inbuf, ctypes.byref(cnt), 0)
     replies = [i for i in range(cnt.value)
                if inbuf[i].RxStatus == 0 and bytes(inbuf[i].Data[4:6]) == b"\x7e\x00"]
     indications = [i for i in range(cnt.value) if inbuf[i].RxStatus & 0x08]
-    check(len(sim.tx_times) >= 8, f"the firmware transmitted repeatedly ({len(sim.tx_times)} in 0.6 s)")
+    check(len(sim.tx_log) >= 8, f"the firmware transmitted repeatedly ({len(sim.tx_log)} in 0.6 s)")
     check(len(replies) >= 8, f"and the ECU's answers were received ({len(replies)})")
     check(not indications, "with no transmit indication for any of them", len(indications))
 
     d.PassThruStopPeriodicMsg(ch, mid)
     check(mid.value not in c.periodic, "Stop removed it from the firmware")
     time.sleep(0.15)
-    before = len(sim.tx_times)
+    before = len(sim.tx_log)
     time.sleep(0.3)
-    check(len(sim.tx_times) == before, "nothing transmits after Stop",
-          len(sim.tx_times) - before)
+    check(len(sim.tx_log) == before, "nothing transmits after Stop",
+          len(sim.tx_log) - before)
     d.PassThruClose(dev)
     stop.set()
 

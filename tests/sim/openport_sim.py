@@ -35,6 +35,7 @@ import struct
 import sys
 import threading
 import time
+from collections import namedtuple
 
 FW_VERSION = "1.17.4877"
 
@@ -97,6 +98,11 @@ RX_FRAMINGS   = ("measured", "old", "start_end_combined")
 CHUNKINGS     = ("id_first_only", "id_every_chunk", "old")
 KLINE_LAYOUTS = ("asymmetric", "uniform")
 ECHO_SHAPES   = ("mirror_rx", "data_only", "combined")
+
+
+#: One frame the adapter put on the bus: `payload` is the message as the driver sent it (on CAN,
+#: the 4-byte id first), `periodic` whether the adapter's periodic engine sent it.
+Transmit = namedtuple("Transmit", "time channel payload periodic")
 
 
 class Channel:
@@ -271,7 +277,7 @@ class OpenPortSim:
         self.tx_count = 0
         self.tp20 = Tp20State()
         self.tp20_modules = {0x01}      # logical addresses that answer a setup
-        self.tx_times = []   # arrival time of each transmit, for pacing tests
+        self.tx_log = []     # every Transmit, for pacing and bus-order tests
         self.cmd_count = 0
         self._seq = None
         self.closed = False
@@ -627,7 +633,7 @@ class OpenPortSim:
         except ValueError: txflags = 0
 
         self.tx_count += 1
-        self.tx_times.append(time.monotonic())
+        self.tx_log.append(Transmit(time.monotonic(), ch, bytes(payload), False))
 
         # A short, unpadded diagnostic frame is invisible to a conforming ECU.
         # The transmit itself still succeeds: the frame reaches the bus, nothing
@@ -808,7 +814,7 @@ class OpenPortSim:
             if self.channels.get(ch) is not c or pid not in c.periodic:
                 break
             self.tx_count += 1
-            self.tx_times.append(time.monotonic())
+            self.tx_log.append(Transmit(time.monotonic(), ch, bytes(payload), True))
             if c.config.get(3):                       # LOOPBACK enabled
                 self._loopback_echo(ch, payload)
             resp = self._ecu_response(ch, payload)
