@@ -288,6 +288,11 @@ class OpenPortSim:
         self.next_periodic_id = 0
         self._out = b""
         self._lock = threading.Lock()
+        # Output queued from a timer or periodic thread wakes the pump at once. Without this it
+        # waited for the pump's select timeout, up to 20 ms per reply on top of the modelled delay.
+        self._wake_r, self._wake_w = os.pipe()
+        os.set_blocking(self._wake_r, False)
+        os.set_blocking(self._wake_w, False)
         self._rng = 0x2545F4914F6CDD1D
 
     # -- helpers ----------------------------------------------------------
@@ -308,6 +313,11 @@ class OpenPortSim:
     def _emit(self, data):
         with self._lock:
             self._out += data
+            # Under the lock: the pump closes the pipe under it, and a late timer must not write to
+            # a descriptor number the process has since reused.
+            if self._wake_w is not None:
+                try: os.write(self._wake_w, b"\0")
+                except BlockingIOError: pass    # a wake is already pending
 
     def _reply(self, text):
         if self.faults.drop_reply_every:
@@ -846,7 +856,10 @@ class OpenPortSim:
     def serve(self, master_fd, stop_evt):
         line, pend, want = b"", b"", 0
         while not stop_evt.is_set() and not self.closed:
-            r, _, _ = select.select([master_fd], [], [], 0.02)
+            r, _, _ = select.select([master_fd, self._wake_r], [], [], 0.02)
+            if self._wake_r in r:
+                try: os.read(self._wake_r, 4096)
+                except BlockingIOError: pass
             if master_fd in r:
                 try: data = os.read(master_fd, 4096)
                 except OSError: break
@@ -874,6 +887,10 @@ class OpenPortSim:
                 except OSError: break
         try: os.close(master_fd)
         except OSError: pass
+        with self._lock:
+            os.close(self._wake_r)
+            os.close(self._wake_w)
+            self._wake_w = None
 
     @staticmethod
     def _declared_payload(line):
