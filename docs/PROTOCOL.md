@@ -66,10 +66,14 @@ bDeviceClass 0x02 (CDC communications)
 It is a standard CDC-ACM serial device; protocol `0x01` is "AT commands", which
 is why every command starts with `at`. There are two ways in:
 
-1. **libusb on the bulk endpoints.** This is what the driver does.
-2. **The serial device node**, `/dev/cu.usbmodem<serial>1` on macOS or
-   `/dev/ttyACM0` on Linux. No libusb and no claiming; convenient for scripts
-   and protocol work. `OPENPORT_DEVICE` points the driver at it.
+1. **The serial device node**, `/dev/cu.usbmodem<serial>1` on macOS or
+   `/dev/ttyACM0` on Linux. No libusb and no claiming. The driver uses it on
+   macOS, found by the cable's USB id, because the kernel's CDC-ACM driver
+   keeps reading the cable while the application is stalled (below).
+2. **libusb on the bulk endpoints.** The driver's path on Linux, and on macOS
+   for a cable with no serial node (storage mode, bootloader), whose problem it
+   names. `OPENPORT_DEVICE=usb` selects it; `OPENPORT_DEVICE=<path>` selects a
+   serial node or a simulator's pty.
 
 ### Claiming the interface on macOS **[V]**
 
@@ -111,14 +115,22 @@ frames, shows it.
 
 Measured on 2026-10-23 with an ECU streaming about 3,000 frames a second on one
 id, each frame carrying a counter, and `OPENPORT_LOG_HEX` recording every USB
-read. With one synchronous read posted at a time, 10 of 18 runs of about 85,000
+read. With one synchronous read posted at a time, 9 of 18 runs of about 85,000
 frames lost frames, 1 to 140 at a time. Every missing frame was absent from the
 USB stream, and at every hole the cable held 1,050 to 1,260 bytes of records
 stamped earlier and not yet read, the oldest 17 to 95 ms old. In a run the same
 day, a second CAN node on the bus recorded a frame the host had lost. So a host
-must keep reads posted
-continuously; the driver keeps 256, resubmitted by a thread of their own
-(`src/op_usb.c`).
+must keep reads posted continuously.
+
+User-space reads are not enough on macOS. With 256 libusb reads kept posted by
+a thread of their own, a Mac short of memory (swapping, about 10 GB compressed)
+lost frames in clusters: 12 of 13 reads in one four-minute stretch, each time
+with 197 to 256 posted reads completed before the thread ran again. Freezing the
+reading process for 300 ms every 2 s (SIGSTOP), as paging does, failed 4 of 4
+reads, the stream stopping after the first freeze although posted reads were
+left. Through the serial node the same freezes, and 1 s freezes every 1.5 s,
+lost nothing in 6 of 6 reads: the kernel driver reads on while the process is
+stopped. Linux is unmeasured; its libusb path keeps the 256 posted reads.
 
 ---
 
@@ -130,6 +142,11 @@ binary payload bytes.
 ```
 at<verb>[<channel>] <arg> <arg> ...\r\n   [payload bytes]
 ```
+
+Send the line and its payload in one write, as Tactrix's DLL does
+(`tools/ab-official/out/vendor.tap`). A payload that follows its line about
+15 ms later draws `are 10`, and the cable then reads the payload as the start of
+the next command, which goes unanswered (measured 2026-10-23).
 
 Device to host: two kinds of data on the same pipe.
 

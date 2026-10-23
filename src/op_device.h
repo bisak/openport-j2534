@@ -92,6 +92,10 @@ typedef struct {
     op_reply        reply;
     char            reply_text[192];
     uint8_t         reply_data[255];  /* raw bytes of an init reply */
+    /* A command line and its payload, guarded by cmd_lock. They go out as one
+     * write, as Tactrix's DLL sends them: the cable rejects a payload that
+     * follows its line late, then reads it as the next command (2026-10-23). */
+    uint8_t         tx[OP_CMD_MAX + 16 + OP_MSG_MAX];
 
     uint8_t         accum[OP_ACCUM_CAP];
     size_t          accum_len;

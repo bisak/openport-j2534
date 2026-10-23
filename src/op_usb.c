@@ -27,7 +27,9 @@
  * 2026-10-23, PROTOCOL.md section 1). So the bulk IN pipe always has
  * USB_RX_TRANSFERS reads posted, resubmitted by a thread that does nothing
  * else and copies what arrives into a ring that usb_read drains. One read
- * completes per packet, so their count is how long that thread may stall.
+ * completes per packet, so their count is how long that thread may stall. On
+ * macOS a paging stall outlasts that, which is why op_transport_open prefers
+ * the cable's serial node there.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -92,6 +94,10 @@ struct op_usb {
      * is retried at the reader's pace rather than in a tight loop. */
     rx_slot               rx[USB_RX_TRANSFERS];
     unsigned              rx_flying;
+    /* Reads that completed while the event thread was away, and the most at
+     * once: all USB_RX_TRANSFERS means the pipe went unpolled and the cable
+     * may have discarded frames. Close logs the most. */
+    unsigned              rx_batch, rx_batch_most;
     op_status             rx_error;
     int                   stopping;
     uint8_t              *ring;
@@ -304,14 +310,15 @@ static void rx_fail(op_usb *u, op_status st)
 /* Under lock. */
 static void rx_submit(rx_slot *s)
 {
+    op_usb *u = s->u;
     int r = libusb_submit_transfer(s->x);
     if (r == LIBUSB_SUCCESS) {
         s->flying = 1;
-        s->u->rx_flying++;
+        u->rx_flying++;
         return;
     }
     op_logf("usb: a read could not be posted: %s", libusb_error_name(r));
-    rx_fail(s->u, from_libusb(r));
+    rx_fail(u, from_libusb(r));
 }
 
 static void LIBUSB_CALL rx_done(struct libusb_transfer *x)
@@ -322,6 +329,7 @@ static void LIBUSB_CALL rx_done(struct libusb_transfer *x)
     pthread_mutex_lock(&u->lock);
     s->flying = 0;
     u->rx_flying--;
+    u->rx_batch++;
     switch (x->status) {
     case LIBUSB_TRANSFER_COMPLETED:
         if (x->actual_length > 0) {
@@ -353,6 +361,10 @@ static void *rx_events(void *arg)
     while (!atomic_load(&u->events_stop)) {
         struct timeval tv = { 0, 100000 };
         libusb_handle_events_timeout_completed(u->ctx, &tv, NULL);
+        pthread_mutex_lock(&u->lock);
+        if (u->rx_batch > u->rx_batch_most) u->rx_batch_most = u->rx_batch;
+        u->rx_batch = 0;
+        pthread_mutex_unlock(&u->lock);
     }
     return NULL;
 }
@@ -394,6 +406,8 @@ static void rx_stop(op_usb *u)
 
     pthread_mutex_lock(&u->lock);
     u->stopping = 1;
+    op_logf("usb: at most %u of the %u posted reads completed before the event thread ran",
+            u->rx_batch_most, USB_RX_TRANSFERS);
     for (i = 0; i < USB_RX_TRANSFERS; i++)
         if (u->rx[i].flying) libusb_cancel_transfer(u->rx[i].x);
     op_deadline_in(&deadline, 1000);
@@ -611,17 +625,24 @@ op_status op_usb_open(op_transport *out)
 }
 
 /*
- * Transport selection. OPENPORT_DEVICE names a character device to use
- * instead of USB — the cable's own CDC-ACM node, or a pty backed by a
- * simulator. Unset (the normal case) means USB, so nothing about the
- * hardware path changes.
+ * Transport selection. OPENPORT_DEVICE names a character device (the cable's
+ * CDC-ACM node, or a simulator's pty), or "usb" for this file's libusb path.
+ * Unset, macOS uses the cable's serial node: the kernel's CDC-ACM driver keeps
+ * reading the bulk IN pipe while this process is stalled by paging, which
+ * freezes the libusb path's threads too, and a 300 ms freeze then lost the
+ * rest of a readout (measured 2026-10-23, PROTOCOL.md section 1). A cable with
+ * no serial node (storage mode, bootloader) goes to libusb, which names the
+ * problem.
  */
 op_status op_transport_open(op_transport *out)
 {
     const char *dev = getenv("OPENPORT_DEVICE");
+    char node[256];
+    if (dev != NULL && strcmp(dev, "usb") == 0) return op_usb_open(out);
     if (dev != NULL && dev[0] != '\0') {
         op_logf("OPENPORT_DEVICE set: using serial transport %s", dev);
         return op_serial_open(out, dev);
     }
+    if (op_serial_find(OP_VID, OP_PID, node, sizeof node) == OP_OK) return op_serial_open(out, node);
     return op_usb_open(out);
 }

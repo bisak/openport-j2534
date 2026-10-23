@@ -50,8 +50,13 @@ op_status op_usb_open(op_transport *out);
 /* Open a character device (the cable's CDC-ACM node, or a pty for testing). */
 op_status op_serial_open(op_transport *out, const char *path);
 
+/* The serial device node of the attached USB device vid:pid, into path.
+ * macOS only; elsewhere, and when there is none, OP_ERR_NO_DEVICE. */
+op_status op_serial_find(uint16_t vid, uint16_t pid, char *path, size_t cap);
+
 /* Whichever the environment selects: OPENPORT_DEVICE names a character
- * device, otherwise USB. Real hardware takes the USB path by default. */
+ * device, or "usb" for libusb. Otherwise, on macOS the cable's own serial
+ * node when it has one, and libusb everywhere else. */
 op_status op_transport_open(op_transport *out);
 
 /* Human-readable detail about the most recent open failure on this thread. */

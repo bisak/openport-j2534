@@ -133,7 +133,7 @@ Do not run your tool with `sudo` to get around an error.
 |---|---|
 | `OPENPORT_LOG=<file>` | Write a diagnostic log; `-` for stderr. |
 | `OPENPORT_LOG_HEX=1` | Add every byte sent and received to that log. |
-| `OPENPORT_DEVICE=<path>` | Use the cable's serial device (`/dev/cu.usbmodem…`, `/dev/ttyACM0`), or the simulator's, instead of USB. |
+| `OPENPORT_DEVICE=<path>` | Use this serial device: the cable's (`/dev/cu.usbmodem…`, `/dev/ttyACM0`) or the simulator's. `usb` uses libusb. Unset, macOS uses the cable's serial device and Linux uses libusb. |
 | `OPENPORT_RECORD=<file>` | Record every J2534 call, for replay against another driver. |
 
 ## Safety

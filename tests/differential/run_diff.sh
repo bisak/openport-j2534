@@ -47,7 +47,7 @@ run_one() {
     # report a perfect, meaningless match. Both libraries reference libusb by
     # absolute path, so nothing needs it.
     (
-        USBTAP_OUT="$out/$label.trace" \
+        OPENPORT_DEVICE=usb USBTAP_OUT="$out/$label.trace" \
         DYLD_INSERT_LIBRARIES="$TAP" \
         exec "$RUNNER" "$lib" ${ARGS[@]:+"${ARGS[@]}"}
     ) > "$out/$label.result" 2>"$out/$label.stderr" &

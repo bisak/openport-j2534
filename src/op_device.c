@@ -620,7 +620,7 @@ static op_status cmd_exchange(op_device *d, const char *line, size_t line_len,
         return OP_ERR_PARAM;
     if (payload_len > 0 && payload == NULL)
         return OP_ERR_PARAM;
-    if (line_len >= sizeof numbered - 16) return OP_ERR_PARAM;
+    if (line_len >= sizeof numbered - 16 || payload_len > OP_MSG_MAX) return OP_ERR_PARAM;
     if (timeout_ms == 0) timeout_ms = 1000;
 
     pthread_mutex_lock(&d->cmd_lock);
@@ -653,9 +653,9 @@ static op_status cmd_exchange(op_device *d, const char *line, size_t line_len,
     d->cmd_verb    = numbered[2];
     pthread_mutex_unlock(&d->lock);
 
-    st = op_write(&d->t, (const uint8_t *)numbered, line_len, timeout_ms);
-    if (st == OP_OK && payload_len > 0)
-        st = op_write(&d->t, payload, payload_len, timeout_ms);
+    memcpy(d->tx, numbered, line_len);
+    if (payload_len > 0) memcpy(d->tx + line_len, payload, payload_len);
+    st = op_write(&d->t, d->tx, line_len + payload_len, timeout_ms);
 
     if (st != OP_OK || !wait) {
         pthread_mutex_lock(&d->lock);

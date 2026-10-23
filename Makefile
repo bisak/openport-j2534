@@ -28,6 +28,7 @@ ifeq ($(UNAME_S),Darwin)
   SHLIB_EXT  := dylib
   SHLIB_FLAG := -dynamiclib -install_name @rpath/$(LIBNAME).dylib
   INSTALL_ID  = install_name_tool -id $(LIBDIR)/$(SHLIB) $(DESTDIR)$(LIBDIR)/$(SHLIB)
+  PLATFORM_LIBS := -framework IOKit -framework CoreFoundation
 else
   SHLIB_EXT  := so
   SHLIB_FLAG := -shared -Wl,-soname,$(LIBNAME).so
@@ -45,7 +46,7 @@ WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion \
 CFLAGS   ?= -O2 -g
 CPPFLAGS += -Iinclude -Isrc -std=c11 -DOPENPORT_VERSION='"$(VERSION)"' \
             -D_POSIX_C_SOURCE=200809L $(LIBUSB_CFLAGS)
-LDLIBS   += $(LIBUSB_LIBS) -lpthread
+LDLIBS   += $(LIBUSB_LIBS) $(PLATFORM_LIBS) -lpthread
 
 SHLIB    := $(LIBNAME).$(SHLIB_EXT)
 SRCS     := src/op_proto.c src/op_log.c src/op_error.c src/op_usb.c \

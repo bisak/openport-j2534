@@ -473,8 +473,12 @@ static void filters(void)
     fc.Data[2]=0x07;   fc.Data[3]=0xE0;
 
     mock_clear_tx();
-    CHECK_EQ(PassThruStartMsgFilter(ch, FLOW_CONTROL_FILTER, &mask, &pat, &fc, &fid),
-             STATUS_NOERROR, "flow-control filter accepted");
+    {
+        unsigned before = mock_writes();
+        CHECK_EQ(PassThruStartMsgFilter(ch, FLOW_CONTROL_FILTER, &mask, &pat, &fc, &fid),
+                 STATUS_NOERROR, "flow-control filter accepted");
+        CHECK_EQ(mock_writes() - before, 1, "the filter's line and messages go out as one write");
+    }
     CHECK_EQ(fid, 0, "filter id from the device");
     /* The device takes ONE per-message length, then that many messages. */
     CHECK(tx_contains("atf6 3 0 4 "), "filter command encoding");

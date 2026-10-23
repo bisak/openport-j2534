@@ -58,6 +58,7 @@ void mock_push_reply(const char *text)
 
 static unsigned  g_tx_delay_ms;
 static int       g_fail_writes;
+static unsigned  g_writes;
 static op_status g_fail_write_st;
 static int       g_fail_reads;
 static op_status g_fail_read_st;
@@ -71,6 +72,7 @@ void mock_reset(void)
     g_responder = NULL;
     g_tx_delay_ms = 0;
     g_fail_writes = g_fail_reads = 0;
+    g_writes = 0;
     g_next_periodic = 0;
     pthread_mutex_unlock(&g_lock);
 }
@@ -114,6 +116,15 @@ void mock_clear_tx(void)
     pthread_mutex_lock(&g_lock);
     g_tx_len = 0;
     pthread_mutex_unlock(&g_lock);
+}
+
+unsigned mock_writes(void)
+{
+    unsigned n;
+    pthread_mutex_lock(&g_lock);
+    n = g_writes;
+    pthread_mutex_unlock(&g_lock);
+    return n;
 }
 
 void mock_fail_writes(int n, op_status st)
@@ -227,6 +238,7 @@ static op_status mock_write(op_transport *t, const uint8_t *buf, size_t len,
         pthread_mutex_unlock(&g_lock);
         return st;
     }
+    g_writes++;
     if (len <= MOCK_CAP - g_tx_len) {
         memcpy(g_tx + g_tx_len, buf, len);
         g_tx_len += len;

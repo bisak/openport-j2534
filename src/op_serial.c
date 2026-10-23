@@ -21,6 +21,9 @@
 /* cfmakeraw and CRTSCTS are BSD/GNU extensions that strict POSIX hides. Rather
  * than widen the feature set, the raw flags are set explicitly below — that is
  * portable to both platforms with no extension at all. */
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE /* TIOCEXCL, and the IOKit headers */
+#endif
 #include "op_transport.h"
 #include "op_log.h"
 
@@ -31,8 +34,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/IOKitLib.h>
+#include <IOKit/serial/IOSerialKeys.h>
+#endif
 
 typedef struct { int fd; } op_serial;
 
@@ -164,6 +173,9 @@ op_status op_serial_open(op_transport *out, const char *path)
         op_logf("serial open %s: %s", path, strerror(errno));
         return from_errno(errno);
     }
+    /* A second program opening the cable would take half its replies. */
+    if (ioctl(fd, TIOCEXCL) != 0)
+        op_logf("serial %s: no exclusive access (%s)", path, strerror(errno));
 
     /* Raw: no line discipline, no echo, no CR/LF translation, no flow control.
      * The protocol is binary in both directions and any translation corrupts
@@ -201,3 +213,48 @@ op_status op_serial_open(op_transport *out, const char *path)
     op_logf("serial open: %s", path);
     return OP_OK;
 }
+
+#ifdef __APPLE__
+/* A USB property of the device a serial service belongs to, or -1. */
+static long usb_number(io_object_t service, CFStringRef key)
+{
+    long v = -1;
+    CFTypeRef n = IORegistryEntrySearchCFProperty(service, kIOServicePlane, key, kCFAllocatorDefault,
+                                                  kIORegistryIterateRecursively | kIORegistryIterateParents);
+    if (n != NULL && CFGetTypeID(n) == CFNumberGetTypeID()) CFNumberGetValue(n, kCFNumberLongType, &v);
+    if (n != NULL) CFRelease(n);
+    return v;
+}
+
+op_status op_serial_find(uint16_t vid, uint16_t pid, char *path, size_t cap)
+{
+    io_iterator_t it;
+    io_object_t service;
+    op_status st = OP_ERR_NO_DEVICE;
+    CFMutableDictionaryRef match = IOServiceMatching(kIOSerialBSDServiceValue);
+
+    if (path == NULL || cap == 0) return OP_ERR_PARAM;
+    if (match == NULL || IOServiceGetMatchingServices(kIOMainPortDefault, match, &it) != KERN_SUCCESS)
+        return OP_ERR_NO_DEVICE;
+    while (st != OP_OK && (service = IOIteratorNext(it)) != 0) {
+        if (usb_number(service, CFSTR("idVendor")) == vid
+            && usb_number(service, CFSTR("idProduct")) == pid) {
+            CFTypeRef callout = IORegistryEntryCreateCFProperty(service, CFSTR(kIOCalloutDeviceKey),
+                                                                kCFAllocatorDefault, 0);
+            if (callout != NULL && CFGetTypeID(callout) == CFStringGetTypeID()
+                && CFStringGetCString(callout, path, (CFIndex)cap, kCFStringEncodingUTF8))
+                st = OP_OK;
+            if (callout != NULL) CFRelease(callout);
+        }
+        IOObjectRelease(service);
+    }
+    IOObjectRelease(it);
+    return st;
+}
+#else
+op_status op_serial_find(uint16_t vid, uint16_t pid, char *path, size_t cap)
+{
+    (void)vid; (void)pid; (void)path; (void)cap;
+    return OP_ERR_NO_DEVICE;
+}
+#endif

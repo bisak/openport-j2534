@@ -29,6 +29,8 @@ const uint8_t *mock_tx(size_t *len);
 void           mock_clear_tx(void);
 
 /* Force the next N transport calls to fail, to exercise error propagation. */
+/* How many writes the driver has made since mock_reset. */
+unsigned mock_writes(void);
 void mock_fail_writes(int n, op_status st);
 void mock_fail_reads(int n, op_status st);
 
