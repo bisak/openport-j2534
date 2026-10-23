@@ -1,5 +1,12 @@
 # Release notes
 
+## Unreleased
+
+Fixes
+
+- Received CAN frames could be lost without any error when the stream was dense. The cable holds only about 1.1 KB for a host that is not reading and then discards new frames silently, and the driver had one USB read posted at a time, so the cable waited out each read's round trip and any pause of the reader thread. Measured on 2026-10-23 at about 3,000 frames a second: 10 of 18 long reads with the byte log on lost frames, every lost frame absent from the USB stream (docs/PROTOCOL.md §1). The driver now keeps 256 reads posted, resubmitted by a thread of their own at the highest scheduling class into a 1 MB ring the reader thread drains; the same 18 reads lost nothing.
+- A program built against a source checkout ran whatever copy was installed, because the library named itself by its installed path. The build tree's library is now `@rpath/libj2534.dylib` and the examples carry the checkout's rpath; `make install` gives the installed copy its own path, as before.
+
 ## 0.4.1 (2026-10-12)
 
 Fixes

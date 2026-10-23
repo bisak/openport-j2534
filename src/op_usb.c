@@ -21,17 +21,35 @@
  * had at open, lowest number first: re-probing the comm interface is what
  * brings the tty back.
  *
+ * Receiving: the cable sends each record as its own short packet and holds
+ * about 1.1 KB of them, some 17 ms of a dense stream, for a host that is not
+ * asking; past that it discards new CAN frames and marks nothing (measured
+ * 2026-10-23, PROTOCOL.md section 1). So the bulk IN pipe always has
+ * USB_RX_TRANSFERS reads posted, resubmitted by a thread that does nothing
+ * else and copies what arrives into a ring that usb_read drains. One read
+ * completes per packet, so their count is how long that thread may stall.
+ *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE /* pthread_set_qos_class_self_np */
+#endif
 #include "op_transport.h"
 #include "op_log.h"
+#include "op_time.h"
 
+#include <errno.h>
 #include <libusb.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
 
 #define OP_VID            0x0403
 #define OP_PID            0xCC4D
@@ -46,7 +64,21 @@
  * "poll", which we serve with the shortest interval the stack can express. */
 #define OP_MIN_TIMEOUT_MS 1u
 
+/* 256 packets is at least 60 ms of a dense stream, on top of the cable's own
+ * 17 ms. A read's buffer is a multiple of the 64-byte packet. */
+#define USB_RX_TRANSFERS 256u
+#define USB_RX_LEN       256
+#define USB_RING_BYTES   (1024u * 1024u)
+
+typedef struct op_usb op_usb;
+
 typedef struct {
+    op_usb                 *u;
+    struct libusb_transfer *x;
+    int                     flying;   /* submitted, callback not yet run */
+} rx_slot;
+
+struct op_usb {
     libusb_context       *ctx;
     libusb_device_handle *handle;
     int                   interface_num;
@@ -54,7 +86,22 @@ typedef struct {
     uint32_t              kernel_bound;   /* interfaces with a kernel driver at open */
     uint8_t               ep_in;
     uint8_t               ep_out;
-} op_usb;
+
+    /* Receive side, guarded by lock. A read that ended in an error is not
+     * resubmitted until usb_read has reported the error, so a failing pipe
+     * is retried at the reader's pace rather than in a tight loop. */
+    rx_slot               rx[USB_RX_TRANSFERS];
+    unsigned              rx_flying;
+    op_status             rx_error;
+    int                   stopping;
+    uint8_t              *ring;
+    size_t                ring_head, ring_used, ring_dropped;
+    pthread_mutex_t       lock;
+    pthread_cond_t        arrived;
+    pthread_t             events;
+    int                   events_started;
+    atomic_int            events_stop;
+};
 
 static _Thread_local char g_detail[256];
 
@@ -217,36 +264,191 @@ static op_status usb_write(op_transport *t, const uint8_t *buf, size_t len,
     return OP_OK;
 }
 
+/* ---- receive ------------------------------------------------------------ */
+
+/* A read whose bytes do not fit is dropped whole and the loss logged by the
+ * next usb_read; the reader resynchronises at the next record. */
+static void ring_put(op_usb *u, const uint8_t *src, size_t n)
+{
+    size_t tail, first;
+    if (n > USB_RING_BYTES - u->ring_used) {
+        u->ring_dropped += n;
+        return;
+    }
+    tail = (u->ring_head + u->ring_used) % USB_RING_BYTES;
+    first = USB_RING_BYTES - tail;
+    if (first > n) first = n;
+    memcpy(u->ring + tail, src, first);
+    memcpy(u->ring, src + first, n - first);
+    u->ring_used += n;
+}
+
+static size_t ring_get(op_usb *u, uint8_t *dst, size_t cap)
+{
+    size_t n = u->ring_used < cap ? u->ring_used : cap;
+    size_t first = USB_RING_BYTES - u->ring_head;
+    if (first > n) first = n;
+    memcpy(dst, u->ring + u->ring_head, first);
+    memcpy(dst + first, u->ring, n - first);
+    u->ring_head = (u->ring_head + n) % USB_RING_BYTES;
+    u->ring_used -= n;
+    return n;
+}
+
+static void rx_fail(op_usb *u, op_status st)
+{
+    if (u->rx_error != OP_ERR_NO_DEVICE) u->rx_error = st;
+    pthread_cond_broadcast(&u->arrived);
+}
+
+/* Under lock. */
+static void rx_submit(rx_slot *s)
+{
+    int r = libusb_submit_transfer(s->x);
+    if (r == LIBUSB_SUCCESS) {
+        s->flying = 1;
+        s->u->rx_flying++;
+        return;
+    }
+    op_logf("usb: a read could not be posted: %s", libusb_error_name(r));
+    rx_fail(s->u, from_libusb(r));
+}
+
+static void LIBUSB_CALL rx_done(struct libusb_transfer *x)
+{
+    rx_slot *s = (rx_slot *)x->user_data;
+    op_usb *u = s->u;
+
+    pthread_mutex_lock(&u->lock);
+    s->flying = 0;
+    u->rx_flying--;
+    switch (x->status) {
+    case LIBUSB_TRANSFER_COMPLETED:
+        if (x->actual_length > 0) {
+            ring_put(u, x->buffer, (size_t)x->actual_length);
+            pthread_cond_broadcast(&u->arrived);
+        }
+        if (!u->stopping) rx_submit(s);
+        break;
+    case LIBUSB_TRANSFER_CANCELLED:
+        break;
+    case LIBUSB_TRANSFER_NO_DEVICE:
+        rx_fail(u, OP_ERR_NO_DEVICE);
+        break;
+    default:
+        op_logf("usb: a read ended with transfer status %d", (int)x->status);
+        rx_fail(u, OP_ERR_IO);
+        break;
+    }
+    if (u->stopping) pthread_cond_broadcast(&u->arrived);
+    pthread_mutex_unlock(&u->lock);
+}
+
+static void *rx_events(void *arg)
+{
+    op_usb *u = (op_usb *)arg;
+#ifdef __APPLE__
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
+    while (!atomic_load(&u->events_stop)) {
+        struct timeval tv = { 0, 100000 };
+        libusb_handle_events_timeout_completed(u->ctx, &tv, NULL);
+    }
+    return NULL;
+}
+
+static op_status rx_start(op_usb *u)
+{
+    unsigned i;
+    op_status st;
+
+    u->ring = malloc(USB_RING_BYTES);
+    if (u->ring == NULL) return OP_ERR_IO;
+    for (i = 0; i < USB_RX_TRANSFERS; i++) {
+        rx_slot *s = &u->rx[i];
+        uint8_t *buf = malloc(USB_RX_LEN);
+        s->u = u;
+        s->x = libusb_alloc_transfer(0);
+        if (s->x == NULL || buf == NULL) { free(buf); return OP_ERR_IO; }
+        libusb_fill_bulk_transfer(s->x, u->handle, u->ep_in, buf, USB_RX_LEN, rx_done, s, 0);
+        s->x->flags = LIBUSB_TRANSFER_FREE_BUFFER;
+    }
+    if (pthread_create(&u->events, NULL, rx_events, u) != 0) return OP_ERR_IO;
+    u->events_started = 1;
+
+    pthread_mutex_lock(&u->lock);
+    for (i = 0; i < USB_RX_TRANSFERS && u->rx_error == OP_OK; i++) rx_submit(&u->rx[i]);
+    st = u->rx_error;
+    pthread_mutex_unlock(&u->lock);
+    return st;
+}
+
+/* Cancel every posted read and wait for its callback before the event thread
+ * stops; a read whose callback never came is left allocated, not freed under
+ * libusb. */
+static void rx_stop(op_usb *u)
+{
+    struct timespec deadline;
+    unsigned i;
+    int rc = 0;
+
+    pthread_mutex_lock(&u->lock);
+    u->stopping = 1;
+    for (i = 0; i < USB_RX_TRANSFERS; i++)
+        if (u->rx[i].flying) libusb_cancel_transfer(u->rx[i].x);
+    op_deadline_in(&deadline, 1000);
+    while (u->rx_flying > 0 && u->events_started && rc != ETIMEDOUT)
+        rc = pthread_cond_timedwait(&u->arrived, &u->lock, &deadline);
+    pthread_mutex_unlock(&u->lock);
+
+    if (u->events_started) {
+        atomic_store(&u->events_stop, 1);
+        pthread_join(u->events, NULL);
+        u->events_started = 0;
+    }
+    if (u->rx_flying > 0) op_logf("usb close: %u reads never returned", u->rx_flying);
+    for (i = 0; i < USB_RX_TRANSFERS; i++)
+        if (!u->rx[i].flying) libusb_free_transfer(u->rx[i].x);
+    free(u->ring);
+}
+
 static op_status usb_read(op_transport *t, uint8_t *buf, size_t cap,
                           size_t *got, unsigned timeout_ms)
 {
     op_usb *u;
-    int moved = 0;
-    int r;
+    struct timespec deadline;
+    op_status st = OP_ERR_TIMEOUT;
+    size_t dropped;
+    unsigned i;
+    int rc = 0;
 
     if (got != NULL) *got = 0;
     if (t == NULL || t->impl == NULL || buf == NULL || got == NULL || cap == 0)
         return OP_ERR_PARAM;
-    if (cap > (size_t)INT_MAX) cap = (size_t)INT_MAX;
     u = (op_usb *)t->impl;
-    if (timeout_ms == 0) timeout_ms = OP_MIN_TIMEOUT_MS;
+    op_deadline_in(&deadline, timeout_ms ? timeout_ms : OP_MIN_TIMEOUT_MS);
 
-    r = libusb_bulk_transfer(u->handle, u->ep_in, buf, (int)cap, &moved,
-                             timeout_ms);
-    if (r == LIBUSB_ERROR_TIMEOUT) {
-        /* A timeout can still have delivered a partial packet. */
-        if (moved > 0) { *got = (size_t)moved; op_log_bytes("RX", buf, *got); return OP_OK; }
-        return OP_ERR_TIMEOUT;
+    pthread_mutex_lock(&u->lock);
+    while (u->ring_used == 0 && u->rx_error == OP_OK && rc != ETIMEDOUT)
+        rc = pthread_cond_timedwait(&u->arrived, &u->lock, &deadline);
+    if (u->ring_used > 0) {
+        *got = ring_get(u, buf, cap);
+        st = OP_OK;
+    } else if (u->rx_error != OP_OK) {
+        st = u->rx_error;
+        if (st != OP_ERR_NO_DEVICE) {
+            u->rx_error = OP_OK;
+            for (i = 0; i < USB_RX_TRANSFERS && u->rx_error == OP_OK; i++)
+                if (!u->rx[i].flying) rx_submit(&u->rx[i]);
+        }
     }
-    if (r != LIBUSB_SUCCESS) {
-        op_logf("usb_read: %s", libusb_error_name(r));
-        return from_libusb(r);
-    }
-    if (moved < 0) return OP_ERR_IO;
-    if (moved == 0) return OP_ERR_TIMEOUT;   /* a zero-length packet: no data */
-    *got = (size_t)moved;
-    op_log_bytes("RX", buf, *got);
-    return OP_OK;
+    dropped = u->ring_dropped;
+    u->ring_dropped = 0;
+    pthread_mutex_unlock(&u->lock);
+
+    if (dropped > 0) op_logf("usb: receive ring full; %zu bytes dropped", dropped);
+    if (st == OP_OK) op_log_bytes("RX", buf, *got);
+    return st;
 }
 
 static void usb_close(op_transport *t)
@@ -254,6 +456,7 @@ static void usb_close(op_transport *t)
     op_usb *u;
     if (t == NULL || t->impl == NULL) return;
     u = (op_usb *)t->impl;
+    rx_stop(u);
     if (u->handle != NULL) {
         int num;
         if (u->claimed) libusb_release_interface(u->handle, u->interface_num);
@@ -270,6 +473,8 @@ static void usb_close(op_transport *t)
         libusb_close(u->handle);
     }
     if (u->ctx != NULL) libusb_exit(u->ctx);
+    pthread_cond_destroy(&u->arrived);
+    pthread_mutex_destroy(&u->lock);
     free(u);
     t->impl = NULL;
     t->ops  = NULL;
@@ -374,13 +579,21 @@ op_status op_usb_open(op_transport *out)
         u->kernel_bound  = bound;
         u->ep_in         = ep_in;
         u->ep_out        = ep_out;
+        pthread_mutex_init(&u->lock, NULL);
+        pthread_cond_init(&u->arrived, NULL);
 
         out->ops  = &g_usb_ops;
         out->impl = u;
-
-        op_logf("usb open: intf %d, bulk in 0x%02x out 0x%02x, mps %u",
-                intf, ep_in, ep_out, (unsigned)mps);
         libusb_free_device_list(list, 1);
+
+        st = rx_start(u);
+        if (st != OP_OK) {
+            set_detail("could not post the cable's reads");
+            usb_close(out);
+            return st;
+        }
+        op_logf("usb open: intf %d, bulk in 0x%02x out 0x%02x, mps %u, %u reads posted",
+                intf, ep_in, ep_out, (unsigned)mps, USB_RX_TRANSFERS);
         return OP_OK;
     }
 

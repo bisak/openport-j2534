@@ -21,13 +21,19 @@ ifeq ($(strip $(LIBUSB_LIBS)),)
 $(error libusb-1.0 not found by $(PKG_CONFIG). Install it: brew install libusb)
 endif
 
+# A program linked against this checkout finds the library through its rpath,
+# so it runs the checkout's build, not an installed one; install gives the
+# installed copy its own path.
 ifeq ($(UNAME_S),Darwin)
   SHLIB_EXT  := dylib
-  SHLIB_FLAG := -dynamiclib -install_name $(LIBDIR)/$(LIBNAME).dylib
+  SHLIB_FLAG := -dynamiclib -install_name @rpath/$(LIBNAME).dylib
+  INSTALL_ID  = install_name_tool -id $(LIBDIR)/$(SHLIB) $(DESTDIR)$(LIBDIR)/$(SHLIB)
 else
   SHLIB_EXT  := so
   SHLIB_FLAG := -shared -Wl,-soname,$(LIBNAME).so
+  INSTALL_ID  = true
 endif
+IN_TREE := -L. -lj2534 -Wl,-rpath,$(CURDIR)
 
 # ARCHS lets CI build a fat binary: make ARCHS="arm64 x86_64"
 ARCHS      ?=
@@ -62,7 +68,7 @@ all: $(SHLIB) probe
 # op_device.h otherwise links old and new layouts into one library.
 -include $(OBJS:.o=.d)
 
-$(SHLIB): $(OBJS)
+$(SHLIB): $(OBJS) Makefile
 	$(CC) $(ARCH_FLAGS) $(SHLIB_FLAG) $(OBJS) $(LDLIBS) -o $@
 
 probe: tools/op_probe
@@ -82,6 +88,7 @@ install: $(SHLIB) probe
 	install -d $(DESTDIR)$(LIBDIR) $(DESTDIR)$(INCLUDEDIR)/j2534 $(DESTDIR)$(PCDIR) $(DESTDIR)$(BINDIR)
 	install -m 644 include/j2534/j2534.h $(DESTDIR)$(INCLUDEDIR)/j2534/
 	install -m 755 $(SHLIB) $(DESTDIR)$(LIBDIR)/
+	$(INSTALL_ID)
 	install -m 755 tools/op_probe $(DESTDIR)$(BINDIR)/
 	sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@LIBDIR@|$(LIBDIR)|g' \
 	    -e 's|@INCLUDEDIR@|$(INCLUDEDIR)|g' -e 's|@VERSION@|$(VERSION)|g' \
@@ -99,17 +106,17 @@ clean:
 smoke: examples/op_smoke
 examples/op_smoke: examples/op_smoke.c $(SHLIB)
 	$(CC) $(ARCH_FLAGS) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $< \
-	      -L. -lj2534 $(LDLIBS) -o $@
+	      $(IN_TREE) $(LDLIBS) -o $@
 
 kline: examples/op_kline
 examples/op_kline: examples/op_kline.c $(SHLIB)
 	$(CC) $(ARCH_FLAGS) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $< \
-	      -L. -lj2534 $(LDLIBS) -o $@
+	      $(IN_TREE) $(LDLIBS) -o $@
 
 iso15765: examples/op_iso15765
 examples/op_iso15765: examples/op_iso15765.c $(SHLIB)
 	$(CC) $(ARCH_FLAGS) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $< \
-	      -L. -lj2534 $(LDLIBS) -o $@
+	      $(IN_TREE) $(LDLIBS) -o $@
 
 # ---- differential harness -------------------------------------------------
 # Path to the reference libj2534.dylib to compare against: make differential OLD_DRIVER=...

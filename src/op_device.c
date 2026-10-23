@@ -4,6 +4,7 @@
  */
 #include "op_device.h"
 #include "op_log.h"
+#include "op_time.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -42,15 +43,6 @@ long op_status_to_j2534(op_status st)
     case OP_ERR_STALLED:       return ERR_DEVICE_NOT_CONNECTED;
     default:                   return ERR_FAILED;
     }
-}
-
-static void deadline_in(struct timespec *ts, unsigned ms)
-{
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    ts->tv_sec  = tv.tv_sec + (time_t)(ms / 1000u);
-    ts->tv_nsec = (long)tv.tv_usec * 1000L + (long)(ms % 1000u) * 1000000L;
-    if (ts->tv_nsec >= 1000000000L) { ts->tv_sec++; ts->tv_nsec -= 1000000000L; }
 }
 
 /* ---- reassembly --------------------------------------------------------- */
@@ -674,7 +666,7 @@ static op_status cmd_exchange(op_device *d, const char *line, size_t line_len,
     }
 
     pthread_mutex_lock(&d->lock);
-    deadline_in(&ts, timeout_ms);
+    op_deadline_in(&ts, timeout_ms);
     while (!d->reply_valid && d->open && !d->lost && rc != ETIMEDOUT)
         rc = pthread_cond_timedwait(&d->reply_cv, &d->lock, &ts);
 
@@ -724,7 +716,7 @@ op_status op_device_pop(op_device *d, unsigned channel, PASSTHRU_MSG *out,
     pthread_mutex_lock(&d->lock);
 
     if (c->qcount == 0 && d->open && !d->lost && timeout_ms > 0) {
-        deadline_in(&ts, timeout_ms);
+        op_deadline_in(&ts, timeout_ms);
         while (c->qcount == 0 && d->open && !d->lost && rc != ETIMEDOUT)
             rc = pthread_cond_timedwait(&d->rx_cv, &d->lock, &ts);
     }

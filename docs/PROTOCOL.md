@@ -29,6 +29,9 @@ For someone writing a driver, the essentials:
 
 - The cable is a USB CDC-ACM serial device. Talk to it over the bulk endpoints
   with libusb, or through its serial device node (§1).
+- Keep bulk IN reads posted at all times. The cable holds only about 1.1 KB for
+  a host that is not reading and then discards received frames without a mark
+  (§1).
 - The host sends ASCII command lines, `at<verb><channel> <args>\r\n`, some
   followed by binary payload. The cable sends ASCII replies (`ar<verb> …`) and
   binary message frames (`ar<digit><len>…`) on the same pipe, interleaved (§2).
@@ -96,6 +99,26 @@ This driver records which interfaces had a kernel driver at open and reattaches
 them at close. That behaviour comes from a report on Linux hardware
 (2026-09-21) and matches how `cdc_acm` works; this project's own cable has not
 been tested on Linux hardware.
+
+### The cable discards frames a host does not collect **[V]**
+
+The cable sends each received frame record as its own short bulk IN packet. A
+host that has no read posted leaves them in the cable, which holds about 1.1 KB:
+50 to 60 raw CAN records, some 17 ms of a dense stream. When that is full the
+cable discards newly received CAN frames. Nothing marks the loss: the next record
+has status `0x00`, and only its timestamp, which jumps across the missing
+frames, shows it.
+
+Measured on 2026-10-23 with an ECU streaming about 3,000 frames a second on one
+id, each frame carrying a counter, and `OPENPORT_LOG_HEX` recording every USB
+read. With one synchronous read posted at a time, 10 of 18 runs of about 85,000
+frames lost frames, 1 to 140 at a time. Every missing frame was absent from the
+USB stream, and at every hole the cable held 1,050 to 1,260 bytes of records
+stamped earlier and not yet read, the oldest 17 to 95 ms old. In a run the same
+day, a second CAN node on the bus recorded a frame the host had lost. So a host
+must keep reads posted
+continuously; the driver keeps 256, resubmitted by a thread of their own
+(`src/op_usb.c`).
 
 ---
 
