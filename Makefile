@@ -1,7 +1,7 @@
 # openport-j2534 — build, test and install.
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-VERSION      := 0.4.1
+VERSION      := 0.4.2
 LIBNAME      := libj2534
 UNAME_S      := $(shell uname -s)
 UNAME_M      := $(shell uname -m)
@@ -66,8 +66,10 @@ all: $(SHLIB) probe
 	$(CC) $(ARCH_FLAGS) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -MMD -MP -fPIC -c $< -o $@
 
 # Rebuild an object when a header it includes changes: a struct edited in
-# op_device.h otherwise links old and new layouts into one library.
+# op_device.h otherwise links old and new layouts into one library. The
+# Makefile holds VERSION, which op_j2534.o reports.
 -include $(OBJS:.o=.d)
+$(OBJS): Makefile
 
 $(SHLIB): $(OBJS) Makefile
 	$(CC) $(ARCH_FLAGS) $(SHLIB_FLAG) $(OBJS) $(LDLIBS) -o $@
