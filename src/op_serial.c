@@ -148,7 +148,13 @@ static void ser_close(op_transport *t)
     op_serial *s;
     if (t == NULL || t->impl == NULL) return;
     s = (op_serial *)t->impl;
-    if (s->fd >= 0) close(s->fd);
+    if (s->fd >= 0) {
+        /* Linux keeps the exclusive mark for as long as anyone has the tty
+         * open, which a pty's other holder (a tap, a simulator) always has;
+         * without this the next open would find the device busy. */
+        (void)ioctl(s->fd, TIOCNXCL);
+        close(s->fd);
+    }
     free(s);
     t->impl = NULL;
     t->ops  = NULL;
