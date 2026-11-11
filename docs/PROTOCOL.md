@@ -85,9 +85,9 @@ CDC-ACM driver, `usbser.sys`, and the cable is "USB Serial Device (COMn)".
 kept posted. Measured on 2026-11-11 on Windows 10 22H2 in a virtual machine
 with the cable passed through, against the bench ECU of §10: both drivers
 carried the same sessions with the same results, a write taking 1.3 ms through
-either. A cable detached mid-session fails the pending read through
-`usbser.sys` with error 995 (`ERROR_OPERATION_ABORTED`); the same through
-Tactrix's driver is unmeasured ([TESTING.md](TESTING.md#the-windows-build)).
+either. A cable detached mid-session fails the pending read with error 995
+(`ERROR_OPERATION_ABORTED`) through both, and Tactrix's driver refuses a
+second open with error 5 ([TESTING.md](TESTING.md#the-windows-build)).
 
 ### Claiming the interface on macOS **[V]**
 
