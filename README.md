@@ -72,10 +72,10 @@ application. With none installed, Windows 10 and later give the cable their
 own USB serial driver and a COM port, which the library finds by the cable's
 USB id. `op_probe.exe` shows which driver the cable has.
 
-The Windows build has so far been run only under Wine: the unit tests, the
-simulator, and the cable against a bench ECU
-([docs/TESTING.md](docs/TESTING.md#the-windows-build)). It has not yet been run
-on Windows. Please report what you see.
+Tested on Windows 10 with each of the two drivers, against a bench ECU; what
+was and was not covered is in
+[docs/TESTING.md](docs/TESTING.md#the-windows-build). No J2534 application has
+been tried with it yet. Please report what you see.
 
 ## Check that it works
 
@@ -148,7 +148,8 @@ difference from Tactrix's driver: [docs/API.md](docs/API.md).
 | J1850, SCI | Not supported by the cable. |
 
 Tested with cable firmware 1.17.4877 on macOS (Apple Silicon) and on Linux
-(Ubuntu 24.04). The Windows build has been tested under Wine only.
+(Ubuntu 24.04), and on Windows 10 (64-bit) with Tactrix's USB driver and with
+Windows' own.
 
 ## Troubleshooting
 

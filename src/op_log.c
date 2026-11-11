@@ -36,7 +36,6 @@ static void log_init_locked(void)
                     dest, strerror(errno));
             return;
         }
-        setvbuf(g_log, NULL, _IOLBF, 0);
     }
 
     hex = getenv("OPENPORT_LOG_HEX");
@@ -50,6 +49,9 @@ void op_log_init(void)
     pthread_mutex_unlock(&g_lock);
 }
 
+/* Flushed by hand after every entry: Windows has no line buffering (its C
+ * library reads _IOLBF as full buffering), and a log is read while the
+ * program that writes it is still running, or after it has crashed. */
 static void stamp(void)
 {
     struct timeval tv;
@@ -68,6 +70,7 @@ void op_logf(const char *fmt, ...)
         vfprintf(g_log, fmt, ap);
         va_end(ap);
         fputc('\n', g_log);
+        fflush(g_log);
     }
     pthread_mutex_unlock(&g_lock);
 }
@@ -85,6 +88,7 @@ void op_log_bytes(const char *tag, const uint8_t *buf, size_t len)
             fprintf(g_log, "%02x ", buf[i]);
         }
         fputc('\n', g_log);
+        fflush(g_log);
     }
     pthread_mutex_unlock(&g_lock);
 }

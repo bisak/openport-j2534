@@ -156,22 +156,69 @@ become layer 3's fixtures.
 
 ## The Windows build
 
-No machine running Windows has run this driver yet. What has been run is the
-Windows build under Wine, which executes the same DLL and implements the Win32
-calls it makes; Wine's serial port is not Windows' `usbser.sys` or Tactrix's
-driver, and that part is still open (below).
+Tested two ways: on Windows 10 in a virtual machine with the cable passed
+through, and under Wine, which runs the same DLL on the build machine and is
+what `make` can repeat.
 
 | Command | What it checks |
 |---|---|
-| `make CC=i686-w64-mingw32-gcc test` | The unit tests of layer 3, compiled for Windows. Everything above the byte pipe is the same code as elsewhere, but `unsigned long` is 4 bytes there. This found a transmit timeout above 2^31 ms read as negative, and the sequence-number seed overflowing. |
+| `make CC=i686-w64-mingw32-gcc test` | The unit tests of layer 3, compiled for Windows and run under Wine. Everything above the byte pipe is the same code as elsewhere, but `unsigned long` is 4 bytes there. This found a transmit timeout above 2^31 ms read as negative, and the sequence-number seed overflowing. |
 | `make wine-sim` | `tests/windows/run_wine.sh` for both widths: the DLL under Wine and the native library run `tools/ab-official/j2534_trace.c`'s scenarios against the simulator, and every step's result and every command on the wire must be the same. This runs `src/op_win.c`, which the unit tests replace with the mock. |
 | `tests/windows/run_wine.sh 32 --cable /dev/ttyACM0` | The same on a cable. Three things differ from run to run there and are reported as differences: the battery voltage, the periodic message ids (the cable keeps counting them while powered), and which frames a live ECU happened to broadcast during a raw CAN read. |
 
 `run_wine.sh` takes scenario names after `--`, as `make ab-official` does:
 `-- sweep`, `-- kline edge`, `-- bench --cycles 200`.
 
-Run on 2026-11-11 (Wine 9.0, Ubuntu 24.04, MinGW-w64 GCC, cable firmware
-1.17.4877), 32-bit and 64-bit alike unless noted:
+### On Windows
+
+Run on 2026-11-11 on Windows 10 Pro 22H2 (64-bit) in VirtualBox 7.0.16, the
+cable (firmware 1.17.4877) passed through and wired to the bench ECU. The same
+programs were run with each of the two USB drivers the cable can have, 32-bit
+and 64-bit alike:
+
+| Run | Tactrix's driver | Windows' `usbser.sys` |
+|---|---|---|
+| `op_probe.exe` | the device interface | "USB Serial Device (COM3)" |
+| `run_tests.exe` (needs no cable) | 654 checks, 0 failures | the same |
+| `op_smoke.exe` | all checks pass | all checks pass |
+| `op_iso15765.exe` on the bench ECU | single-frame and multi-frame replies, raw CAN; 0 failures | the same |
+| `j2534_trace.exe`, default scenarios | 67 steps | 67 steps, every return code as with Tactrix's driver |
+| `j2534_trace.exe bench --cycles 100` | 100 of 100 answered; a write takes 1.3 ms (median) | 100 of 100; 1.3 ms |
+| Cable detached from the machine mid-session | not run | the waiting `PassThruReadMsgs` returns `ERR_DEVICE_NOT_CONNECTED` after 0.27 s, every later call at once; a new `PassThruOpen` reports no cable |
+| `regsvr32`, `regsvr32 /u` | each DLL's key appears in, and leaves, its own registry view | |
+
+Removing Tactrix's driver package (`pnputil /delete-driver … /uninstall`) was
+enough for Windows to give the cable `usbser.sys` and a COM port, which the
+library found by USB id.
+
+The first run found one fault: a log or recording file was only written when
+the program ended, because Windows' C library has no line buffering. Both are
+now flushed after every line.
+
+Two things from that session to know about:
+
+- The cable stopped answering once, 11 seconds into a session through
+  Tactrix's driver: writes were accepted and nothing came back, in that
+  program, in the next, and from the Linux host after the cable was handed
+  back. A USB port reset did not clear it. The cause is not established; the
+  cable had been attached to and detached from the virtual machine several
+  times, and test programs had been killed mid-session (next item).
+- Windows Defender ends a test program that is started by typing its command
+  into the Run dialog (`Behavior:Win32/SuspClickFix`), about a second in and
+  with exit code 0. Start them from a console or by double-clicking a script.
+
+Still open on Windows:
+
+- detaching the cable through Tactrix's driver, and whether that driver
+  refuses a second program while the library has the cable open;
+- a J2534 application loading the registered DLL;
+- any Windows version other than 10.
+
+### Under Wine
+
+Run on 2026-11-11 (Wine 9.0, Ubuntu 24.04, MinGW-w64 GCC), 32-bit and 64-bit
+alike unless noted. Wine hands the DLL the simulator's pty or `/dev/ttyACM0` as
+a serial port, so this exercises `src/op_win.c` but neither Windows driver.
 
 | Run | Result |
 |---|---|
@@ -181,21 +228,11 @@ Run on 2026-11-11 (Wine 9.0, Ubuntu 24.04, MinGW-w64 GCC, cable firmware
 | Simulator, `kline edge` (32-bit) | 53 steps, 0 differ, wire identical |
 | Cable and bench ECU, default scenarios | 67 steps; only the battery voltage, the periodic ids and the ECU's broadcast frames differ |
 | Cable and bench ECU, `bench --cycles 200` (32-bit) | 407 steps, 0 differ, wire identical |
-| `op_iso15765.exe` on the bench ECU (32-bit) | single-frame and multi-frame replies and raw CAN, as the native build delivers them |
 | Simulator killed mid-session (32-bit) | every later call fails with `ERR_DEVICE_NOT_CONNECTED` within 0.6 s |
-| `regsvr32`, `regsvr32 /u` | each DLL's key appears in, and leaves, its own registry view |
 | Opening through Tactrix's interface class | found and opened with `tools/ab-official/iface.reg` imported and the interface linked to the cable |
 
-Still open, and only a Windows machine can close it:
-
-- that Windows 10 and later give a cable with no vendor driver a COM port, and
-  that the library finds it by USB id;
-- reads and writes through Tactrix's driver, and whether it accepts the
-  exclusive open the library asks for;
-- the read timeouts `src/op_win.c` sets on a COM port. Wine 9.0 does not
-  implement that combination, so under Wine the library sets another one;
-- which error an unplugged cable gives through each driver;
-- a real J2534 application loading the registered DLL.
+Wine 9.0 does not implement the serial read timeouts the library sets on
+Windows, so under Wine it sets another combination (`src/op_win.c`).
 
 ## The bug every layer missed
 

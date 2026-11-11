@@ -95,7 +95,7 @@ static op_status from_io_error(DWORD e)
     case ERROR_FILE_NOT_FOUND:
     case ERROR_INVALID_HANDLE:
     case ERROR_ACCESS_DENIED:
-    case ERROR_OPERATION_ABORTED:
+    case ERROR_OPERATION_ABORTED: /* usbser.sys, cable unplugged (measured) */
     case ERROR_BROKEN_PIPE:       /* Wine, when a pty's other end closes */
         return OP_ERR_NO_DEVICE;
     default:
@@ -276,6 +276,8 @@ static int comm_setup(HANDLE h)
      * nothing is, wait for the first byte, at most the constant". A read that
      * waits out the constant completes with zero bytes and is posted again.
      * Writes carry no timeout of their own: win_write cancels them.
+     *
+     * usbser.sys honours it (Windows 10, 2026-11-11).
      *
      * Wine (9.0) does not know the combination and waits for the whole
      * buffer. There the interval alone does the same job: an overlapped read
