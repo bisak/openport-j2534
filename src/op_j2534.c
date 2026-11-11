@@ -65,8 +65,7 @@ static int rec_on(void)
 {
     if (g_rec == NULL) {
         const char *path = getenv("OPENPORT_RECORD");
-        if (path != NULL && *path != '\0' && (g_rec = fopen(path, "a")) != NULL)
-            setvbuf(g_rec, NULL, _IOLBF, 0);
+        if (path != NULL && *path != '\0') g_rec = fopen(path, "a");
     }
     return g_rec != NULL;
 }
@@ -80,6 +79,7 @@ static void rec_line(const char *fmt, ...)
     vfprintf(g_rec, fmt, ap);
     va_end(ap);
     fputc('\n', g_rec);
+    fflush(g_rec);      /* by hand: Windows has no line buffering */
 }
 
 static void rec_msgs(const char *head, const PASSTHRU_MSG *m, J_U32 n)
@@ -90,6 +90,7 @@ static void rec_msgs(const char *head, const PASSTHRU_MSG *m, J_U32 n)
     if (m == NULL) n = 0;
     for (i = 0; i < n && i < 64; i++) rec_msg(&m[i]);
     fputc('\n', g_rec);
+    fflush(g_rec);
 }
 
 /* A reason set deeper down (a size range, a dead K-line) is kept; only a

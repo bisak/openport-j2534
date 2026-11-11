@@ -4,10 +4,11 @@
 
 New
 
-- Windows. `make CC=i686-w64-mingw32-gcc` and `make CC=x86_64-w64-mingw32-gcc` build `openport-j2534-32.dll` and `openport-j2534-64.dll` with MinGW-w64, with no libusb. The functions are `__stdcall` under their plain names, `regsvr32` adds the DLL to the list J2534 applications read (`PassThruSupport.04.04`), and the cable is opened through Tactrix's USB driver when that is installed or through its COM port when Windows uses its own serial driver. `op_probe.exe` shows which. Tested under Wine only, against the simulator, the cable and a bench ECU (docs/TESTING.md); not yet run on Windows.
+- Windows. `make CC=i686-w64-mingw32-gcc` and `make CC=x86_64-w64-mingw32-gcc` build `openport-j2534-32.dll` and `openport-j2534-64.dll` with MinGW-w64, with no libusb. The functions are `__stdcall` under their plain names, `regsvr32` adds the DLL to the list J2534 applications read (`PassThruSupport.04.04`), and the cable is opened through Tactrix's USB driver when that is installed or through its COM port when Windows uses its own serial driver. `op_probe.exe` shows which. Tested on Windows 10 with both drivers against a bench ECU, and under Wine against the simulator (docs/TESTING.md); no J2534 application has been tried with it yet.
 
 Fixes
 
+- The log (`OPENPORT_LOG`) and the call recording (`OPENPORT_RECORD`) are flushed after every line. They relied on line buffering, which Windows' C library does not have.
 - On Linux, a serial device that another process also held open (a pty behind a tap or a simulator) stayed marked exclusive after `PassThruClose`, and the next `PassThruOpen` returned `ERR_DEVICE_IN_USE`. Close now gives the mark back.
 
 ## 0.4.2 (2026-10-23)
