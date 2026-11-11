@@ -44,19 +44,23 @@ struct op_transport {
     void                   *impl;
 };
 
-/* Open the first attached OpenPort over USB bulk endpoints. */
+/* Open the first attached OpenPort over USB bulk endpoints. Not on Windows,
+ * where the build has no libusb. */
 op_status op_usb_open(op_transport *out);
 
-/* Open a character device (the cable's CDC-ACM node, or a pty for testing). */
+/* Open a character device (the cable's CDC-ACM node, or a pty for testing).
+ * On Windows, a COM port by name ("COM7") or a device path. */
 op_status op_serial_open(op_transport *out, const char *path);
 
 /* The serial device node of the attached USB device vid:pid, into path.
- * macOS only; elsewhere, and when there is none, OP_ERR_NO_DEVICE. */
+ * macOS, and Windows (the cable's COM port); elsewhere, and when there is
+ * none, OP_ERR_NO_DEVICE. */
 op_status op_serial_find(uint16_t vid, uint16_t pid, char *path, size_t cap);
 
 /* Whichever the environment selects: OPENPORT_DEVICE names a character
  * device, or "usb" for libusb. Otherwise, on macOS the cable's own serial
- * node when it has one, and libusb everywhere else. */
+ * node when it has one, on Windows Tactrix's device interface or else the
+ * cable's COM port (op_win.c), and libusb everywhere else. */
 op_status op_transport_open(op_transport *out);
 
 /* Human-readable detail about the most recent open failure on this thread. */

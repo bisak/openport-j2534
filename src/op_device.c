@@ -551,7 +551,10 @@ op_status op_device_open(op_device *d)
     {
         struct timeval tv;
         gettimeofday(&tv, NULL);
-        d->seq_next = 256 + (uint32_t)((tv.tv_sec * 1000 + tv.tv_usec / 1000) % 900000);
+        /* In 64 bits: tv_sec is a 32-bit long on Windows, and the product
+         * does not fit one. */
+        d->seq_next = 256 + (uint32_t)(((uint64_t)tv.tv_sec * 1000u
+                                        + (uint64_t)tv.tv_usec / 1000u) % 900000u);
     }
     d->seq_pending = 0;
     atomic_store(&d->reader_stop, 0);

@@ -10,6 +10,7 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
+#include "op_printf.h"
 #include "j2534/j2534.h"
 #include "op_device.h"
 #include "op_error.h"
@@ -70,7 +71,7 @@ static int rec_on(void)
     return g_rec != NULL;
 }
 
-static void rec_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void rec_line(const char *fmt, ...) OP_PRINTF(1, 2);
 static void rec_line(const char *fmt, ...)
 {
     va_list ap;
@@ -198,7 +199,7 @@ static long periodic_stop(op_device *d, op_channel *c, J_U32 channel, unsigned s
 
 /* ---- 1. PassThruOpen ---------------------------------------------------- */
 
-long PassThruOpen(const void *pName, J_U32 *pDeviceID)
+long J2534_API PassThruOpen(const void *pName, J_U32 *pDeviceID)
 {
     op_device *d = op_device_get();
     op_status st;
@@ -283,7 +284,7 @@ long PassThruOpen(const void *pName, J_U32 *pDeviceID)
 
 /* ---- 2. PassThruClose --------------------------------------------------- */
 
-long PassThruClose(J_U32 DeviceID)
+long J2534_API PassThruClose(J_U32 DeviceID)
 {
     op_device *d = op_device_get();
     char line[OP_CMD_MAX];
@@ -311,7 +312,7 @@ long PassThruClose(J_U32 DeviceID)
 
 /* ---- 3. PassThruConnect ------------------------------------------------- */
 
-long PassThruConnect(J_U32 DeviceID, J_U32 ProtocolID, J_U32 Flags,
+long J2534_API PassThruConnect(J_U32 DeviceID, J_U32 ProtocolID, J_U32 Flags,
                      J_U32 BaudRate, J_U32 *pChannelID)
 {
     op_device *d = op_device_get();
@@ -385,7 +386,7 @@ long PassThruConnect(J_U32 DeviceID, J_U32 ProtocolID, J_U32 Flags,
 
 /* ---- 4. PassThruDisconnect ---------------------------------------------- */
 
-long PassThruDisconnect(J_U32 ChannelID)
+long J2534_API PassThruDisconnect(J_U32 ChannelID)
 {
     op_device *d = op_device_get();
     char line[OP_CMD_MAX];
@@ -409,7 +410,7 @@ long PassThruDisconnect(J_U32 ChannelID)
 
 /* ---- 5. PassThruReadMsgs ------------------------------------------------ */
 
-long PassThruReadMsgs(J_U32 ChannelID, PASSTHRU_MSG *pMsg, J_U32 *pNumMsgs,
+long J2534_API PassThruReadMsgs(J_U32 ChannelID, PASSTHRU_MSG *pMsg, J_U32 *pNumMsgs,
                       J_U32 Timeout)
 {
     op_device *d = op_device_get();
@@ -579,7 +580,7 @@ static long write_one(op_device *d, J_U32 channel, const PASSTHRU_MSG *m,
                       timeout_ms, NULL);
 }
 
-long PassThruWriteMsgs(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
+long J2534_API PassThruWriteMsgs(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
                        J_U32 *pNumMsgs, J_U32 Timeout)
 {
     op_device *d = op_device_get();
@@ -615,7 +616,8 @@ long PassThruWriteMsgs(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
         gettimeofday(&start, NULL);
 
         while (sent < want) {
-            long elapsed_ms, remaining;
+            long elapsed_ms;
+            J_U32 remaining;
             long rc;
 
             gettimeofday(&now, NULL);
@@ -636,8 +638,10 @@ long PassThruWriteMsgs(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
                 sent++;
                 continue;
             } else {
-                remaining = (long)Timeout - elapsed_ms;
-                if (remaining <= 0) {
+                /* Unsigned: Timeout reaches 0xFFFFFFFF, which a 32-bit
+                 * long (Windows) would read as negative. */
+                remaining = (J_U32)elapsed_ms < Timeout ? Timeout - (J_U32)elapsed_ms : 0;
+                if (remaining == 0) {
                     *pNumMsgs = sent;
                     op_err_set("PassThruWriteMsgs: %lu of %lu sent before the "
                                "%lu ms budget expired",
@@ -647,7 +651,8 @@ long PassThruWriteMsgs(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
                 }
             }
 
-            rc = write_one(d, ChannelID, &pMsg[sent], (unsigned)remaining);
+            rc = write_one(d, ChannelID, &pMsg[sent],
+                           remaining > 0xFFFFFFFFu ? 0xFFFFFFFFu : (unsigned)remaining);
             if (rc != STATUS_NOERROR) {
                 *pNumMsgs = sent;
                 return fail(rc, "PassThruWriteMsgs");
@@ -663,7 +668,7 @@ long PassThruWriteMsgs(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
 
 /* Scheduled by the firmware (`atm`/`atn`), as Tactrix's DLL does: the
  * interval is kept to 0.1 ms and nothing on the host has to be awake. */
-long PassThruStartPeriodicMsg(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
+long J2534_API PassThruStartPeriodicMsg(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
                               J_U32 *pMsgID, J_U32 TimeInterval)
 {
     op_device *d = op_device_get();
@@ -715,7 +720,7 @@ long PassThruStartPeriodicMsg(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
     return STATUS_NOERROR;
 }
 
-long PassThruStopPeriodicMsg(J_U32 ChannelID, J_U32 MsgID)
+long J2534_API PassThruStopPeriodicMsg(J_U32 ChannelID, J_U32 MsgID)
 {
     op_device *d = op_device_get();
     op_channel *c;
@@ -737,7 +742,7 @@ long PassThruStopPeriodicMsg(J_U32 ChannelID, J_U32 MsgID)
 
 /* ---- 9. PassThruStartMsgFilter ------------------------------------------ */
 
-long PassThruStartMsgFilter(J_U32 ChannelID, J_U32 FilterType,
+long J2534_API PassThruStartMsgFilter(J_U32 ChannelID, J_U32 FilterType,
                             const PASSTHRU_MSG *pMaskMsg,
                             const PASSTHRU_MSG *pPatternMsg,
                             const PASSTHRU_MSG *pFlowControlMsg,
@@ -840,7 +845,7 @@ long PassThruStartMsgFilter(J_U32 ChannelID, J_U32 FilterType,
 
 /* ---- 10. PassThruStopMsgFilter ------------------------------------------ */
 
-long PassThruStopMsgFilter(J_U32 ChannelID, J_U32 FilterID)
+long J2534_API PassThruStopMsgFilter(J_U32 ChannelID, J_U32 FilterID)
 {
     op_device *d = op_device_get();
     char line[OP_CMD_MAX];
@@ -861,7 +866,7 @@ long PassThruStopMsgFilter(J_U32 ChannelID, J_U32 FilterID)
 
 /* ---- 11. PassThruSetProgrammingVoltage ---------------------------------- */
 
-long PassThruSetProgrammingVoltage(J_U32 DeviceID, J_U32 PinNumber, J_U32 Voltage)
+long J2534_API PassThruSetProgrammingVoltage(J_U32 DeviceID, J_U32 PinNumber, J_U32 Voltage)
 {
     op_device *d = op_device_get();
     char line[OP_CMD_MAX];
@@ -920,7 +925,7 @@ long PassThruSetProgrammingVoltage(J_U32 DeviceID, J_U32 PinNumber, J_U32 Voltag
 
 /* ---- 12. PassThruReadVersion -------------------------------------------- */
 
-long PassThruReadVersion(J_U32 DeviceID, char *pFirmwareVersion,
+long J2534_API PassThruReadVersion(J_U32 DeviceID, char *pFirmwareVersion,
                          char *pDllVersion, char *pApiVersion)
 {
     op_device *d = op_device_get();
@@ -944,7 +949,7 @@ long PassThruReadVersion(J_U32 DeviceID, char *pFirmwareVersion,
 
 /* ---- 13. PassThruGetLastError ------------------------------------------- */
 
-long PassThruGetLastError(char *pErrorDescription)
+long J2534_API PassThruGetLastError(char *pErrorDescription)
 {
     rec_line("lasterr");
     if (pErrorDescription == NULL) return ERR_NULL_PARAMETER;
@@ -1107,7 +1112,7 @@ static long ioctl_init(op_device *d, J_U32 ChannelID, int five_baud,
     return STATUS_NOERROR;
 }
 
-long PassThruIoctl(J_U32 ChannelID, J_U32 IoctlID, const void *pInput,
+long J2534_API PassThruIoctl(J_U32 ChannelID, J_U32 IoctlID, const void *pInput,
                    void *pOutput)
 {
     op_device *d = op_device_get();

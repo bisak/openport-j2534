@@ -17,6 +17,30 @@ static inline void sleep_us(unsigned long us)
     nanosleep(&ts, NULL);
 }
 
+/* The environment and the temporary directory, which Windows spells its own
+ * way. There the recording outlives the test: the library still holds it
+ * open, and Windows does not delete an open file. */
+#ifdef _WIN32
+#include <stdlib.h>
+static inline void test_setenv(const char *name, const char *value)
+{
+    _putenv_s(name, value != NULL ? value : "");
+}
+static inline const char *test_tmpdir(void)
+{
+    const char *t = getenv("TEMP");
+    return t != NULL ? t : ".";
+}
+#else
+#include <stdlib.h>
+static inline void test_setenv(const char *name, const char *value)
+{
+    if (value != NULL) setenv(name, value, 1);
+    else unsetenv(name);
+}
+static inline const char *test_tmpdir(void) { return "/tmp"; }
+#endif
+
 #define CHECK(cond, ...) do {                                   \
     g_tests++;                                                  \
     if (!(cond)) {                                              \

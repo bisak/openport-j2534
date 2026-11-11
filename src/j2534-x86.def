@@ -1,0 +1,23 @@
+; Exports of the 32-bit Windows DLL. The functions are __stdcall, whose
+; symbols carry the size of their arguments; J2534 applications look the
+; plain names up, so the DLL is linked with --kill-at, and the import library
+; is made from this file by `dlltool --kill-at` so that it maps each
+; decorated symbol to its plain export.
+; SPDX-License-Identifier: GPL-3.0-or-later
+EXPORTS
+    PassThruOpen@8
+    PassThruClose@4
+    PassThruConnect@20
+    PassThruDisconnect@4
+    PassThruReadMsgs@16
+    PassThruWriteMsgs@16
+    PassThruStartPeriodicMsg@16
+    PassThruStopPeriodicMsg@8
+    PassThruStartMsgFilter@24
+    PassThruStopMsgFilter@8
+    PassThruSetProgrammingVoltage@12
+    PassThruReadVersion@16
+    PassThruGetLastError@4
+    PassThruIoctl@16
+    DllRegisterServer@0 PRIVATE
+    DllUnregisterServer@0 PRIVATE

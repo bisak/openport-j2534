@@ -75,6 +75,18 @@ is why every command starts with `at`. There are two ways in:
    names. `OPENPORT_DEVICE=usb` selects it; `OPENPORT_DEVICE=<path>` selects a
    serial node or a simulator's pty.
 
+On Windows the same two ways exist under other names **[U]**. Tactrix's USB
+driver offers the bulk pipes as a device interface of class
+`{6d1781b7-c987-4f6c-8d4f-1efc098bea67}`, the handle `op20pt32.dll` opens and
+reads with overlapped `ReadFile` (its registry shape is
+`tools/ab-official/iface.reg`). Without that driver, Windows 10 and later are
+expected to bind their own CDC-ACM driver, `usbser.sys`, and give the cable a
+COM port. `src/op_win.c` opens either, the interface first, with one overlapped
+read kept posted. Neither has been exercised on Windows: on 2026-11-11 the
+Windows build ran under Wine 9.0 on Ubuntu 24.04, where both names lead to
+`/dev/ttyACM0`, against the simulator, the cable and the bench ECU of §10
+([TESTING.md](TESTING.md#the-windows-build)).
+
 ### Claiming the interface on macOS **[V]**
 
 macOS's `AppleUSBCDCACM` binds both interfaces, and

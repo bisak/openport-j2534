@@ -19,8 +19,17 @@ extern "C" {
  * "unsigned long" is 64-bit on LP64 (macOS/Linux arm64 + x86_64); the whole
  * ecosystem — including every consumer we care about — declares these APIs
  * with unsigned long, so we match that and stay ABI-compatible on this
- * platform rather than silently disagreeing with our callers. */
+ * platform rather than silently disagreeing with our callers. On Windows
+ * "unsigned long" is 32 bits, in 32-bit and 64-bit programs alike. */
 typedef unsigned long J_U32;
+
+/* The standard's calling convention on Windows is __stdcall (WINAPI), which
+ * matters to 32-bit programs only. Elsewhere it is the platform's own. */
+#ifdef _WIN32
+#define J2534_API __stdcall
+#else
+#define J2534_API
+#endif
 
 /* ---- ProtocolID ------------------------------------------------------- */
 #define J1850VPW                    1UL
@@ -221,29 +230,29 @@ typedef struct {
 } PASSTHRU_MSG;
 
 /* ---- The 14 entry points ---------------------------------------------- */
-long PassThruOpen(const void *pName, J_U32 *pDeviceID);
-long PassThruClose(J_U32 DeviceID);
-long PassThruConnect(J_U32 DeviceID, J_U32 ProtocolID, J_U32 Flags,
+long J2534_API PassThruOpen(const void *pName, J_U32 *pDeviceID);
+long J2534_API PassThruClose(J_U32 DeviceID);
+long J2534_API PassThruConnect(J_U32 DeviceID, J_U32 ProtocolID, J_U32 Flags,
                      J_U32 BaudRate, J_U32 *pChannelID);
-long PassThruDisconnect(J_U32 ChannelID);
-long PassThruReadMsgs(J_U32 ChannelID, PASSTHRU_MSG *pMsg,
+long J2534_API PassThruDisconnect(J_U32 ChannelID);
+long J2534_API PassThruReadMsgs(J_U32 ChannelID, PASSTHRU_MSG *pMsg,
                       J_U32 *pNumMsgs, J_U32 Timeout);
-long PassThruWriteMsgs(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
+long J2534_API PassThruWriteMsgs(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
                        J_U32 *pNumMsgs, J_U32 Timeout);
-long PassThruStartPeriodicMsg(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
+long J2534_API PassThruStartPeriodicMsg(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
                               J_U32 *pMsgID, J_U32 TimeInterval);
-long PassThruStopPeriodicMsg(J_U32 ChannelID, J_U32 MsgID);
-long PassThruStartMsgFilter(J_U32 ChannelID, J_U32 FilterType,
+long J2534_API PassThruStopPeriodicMsg(J_U32 ChannelID, J_U32 MsgID);
+long J2534_API PassThruStartMsgFilter(J_U32 ChannelID, J_U32 FilterType,
                             const PASSTHRU_MSG *pMaskMsg,
                             const PASSTHRU_MSG *pPatternMsg,
                             const PASSTHRU_MSG *pFlowControlMsg,
                             J_U32 *pFilterID);
-long PassThruStopMsgFilter(J_U32 ChannelID, J_U32 FilterID);
-long PassThruSetProgrammingVoltage(J_U32 DeviceID, J_U32 PinNumber, J_U32 Voltage);
-long PassThruReadVersion(J_U32 DeviceID, char *pFirmwareVersion,
+long J2534_API PassThruStopMsgFilter(J_U32 ChannelID, J_U32 FilterID);
+long J2534_API PassThruSetProgrammingVoltage(J_U32 DeviceID, J_U32 PinNumber, J_U32 Voltage);
+long J2534_API PassThruReadVersion(J_U32 DeviceID, char *pFirmwareVersion,
                          char *pDllVersion, char *pApiVersion);
-long PassThruGetLastError(char *pErrorDescription);
-long PassThruIoctl(J_U32 ChannelID, J_U32 IoctlID,
+long J2534_API PassThruGetLastError(char *pErrorDescription);
+long J2534_API PassThruIoctl(J_U32 ChannelID, J_U32 IoctlID,
                    const void *pInput, void *pOutput);
 
 #ifdef __cplusplus
