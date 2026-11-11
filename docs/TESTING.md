@@ -184,7 +184,8 @@ and 64-bit alike:
 | `op_iso15765.exe` on the bench ECU | single-frame and multi-frame replies, raw CAN; 0 failures | the same |
 | `j2534_trace.exe`, default scenarios | 67 steps | 67 steps, every return code as with Tactrix's driver |
 | `j2534_trace.exe bench --cycles 100` | 100 of 100 answered; a write takes 1.3 ms (median) | 100 of 100; 1.3 ms |
-| Cable detached from the machine mid-session | not run | the waiting `PassThruReadMsgs` returns `ERR_DEVICE_NOT_CONNECTED` after 0.27 s, every later call at once; a new `PassThruOpen` reports no cable |
+| Cable detached from the machine mid-session | the waiting `PassThruReadMsgs` returns `ERR_DEVICE_NOT_CONNECTED` at once, and so does every later call; a new `PassThruOpen` reports no cable | the same, the waiting read after 0.27 s |
+| A second program opening the cable | `ERR_DEVICE_IN_USE`; the first program's session is not disturbed | not run |
 | `regsvr32`, `regsvr32 /u` | each DLL's key appears in, and leaves, its own registry view | |
 
 Removing Tactrix's driver package (`pnputil /delete-driver … /uninstall`) was
@@ -202,15 +203,15 @@ Two things from that session to know about:
   program, in the next, and from the Linux host after the cable was handed
   back. A USB port reset did not clear it. The cause is not established; the
   cable had been attached to and detached from the virtual machine several
-  times, and test programs had been killed mid-session (next item).
+  times, and test programs had been killed mid-session (next item). After a
+  replug it answered again, and a further detach and reattach did not bring
+  the fault back.
 - Windows Defender ends a test program that is started by typing its command
   into the Run dialog (`Behavior:Win32/SuspClickFix`), about a second in and
   with exit code 0. Start them from a console or by double-clicking a script.
 
 Still open on Windows:
 
-- detaching the cable through Tactrix's driver, and whether that driver
-  refuses a second program while the library has the cable open;
 - a J2534 application loading the registered DLL;
 - any Windows version other than 10.
 

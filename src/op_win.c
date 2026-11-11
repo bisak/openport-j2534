@@ -95,7 +95,7 @@ static op_status from_io_error(DWORD e)
     case ERROR_FILE_NOT_FOUND:
     case ERROR_INVALID_HANDLE:
     case ERROR_ACCESS_DENIED:
-    case ERROR_OPERATION_ABORTED: /* usbser.sys, cable unplugged (measured) */
+    case ERROR_OPERATION_ABORTED: /* both drivers, cable unplugged (measured) */
     case ERROR_BROKEN_PIPE:       /* Wine, when a pty's other end closes */
         return OP_ERR_NO_DEVICE;
     default:
