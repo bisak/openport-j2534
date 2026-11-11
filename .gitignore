@@ -16,3 +16,4 @@ tools/ab-official/j2534_trace
 tools/ab-official/j2534_trace.exe
 car-session-*/
 *.d
+build/

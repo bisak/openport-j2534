@@ -14,8 +14,9 @@ this page says so.
   functional id `0x7DF` still needs its flow-control filter on the ECU's own
   ids (for example `0x7E8`/`0x7E0`), or every multi-frame reply stalls after the
   first frame.
-- **Integers are `unsigned long`**, 8 bytes on 64-bit macOS and Linux. Declare
-  them that way in any binding.
+- **Integers are `unsigned long`**, 8 bytes on 64-bit macOS and Linux and 4
+  bytes on Windows. Declare them that way in any binding. On Windows the
+  functions are `__stdcall`, exported under their plain names.
 - **Nothing blocks forever.** Every call has a time limit. When one fails,
   `PassThruGetLastError` gives the reason.
 - **Periodic messages run in the cable.** If your process dies, a periodic

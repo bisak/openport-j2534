@@ -1226,13 +1226,15 @@ static void sequence_numbers_are_matched(void)
 /* ---- call recording ------------------------------------------------------ */
 static void calls_are_recorded(void)
 {
-    char path[] = "/tmp/op_rec_XXXXXX";
-    int fd = mkstemp(path);
+    char path[300];
+    int fd;
     J_U32 dev, ch = 0, n = 1; PASSTHRU_MSG m; FILE *f; char line[512]; int lines = 0;
     int saw_open = 0, saw_result = 0, saw_write = 0, saw_ioctl = 0;
+    snprintf(path, sizeof path, "%s/op_rec_XXXXXX", test_tmpdir());
+    fd = mkstemp(path);
     if (fd < 0) { CHECK(0, "mkstemp"); return; }
     close(fd);
-    setenv("OPENPORT_RECORD", path, 1);
+    test_setenv("OPENPORT_RECORD", path);
     dev = open_device();
     PassThruConnect(dev, ISO15765, 0, 500000, &ch);
     {
@@ -1245,7 +1247,7 @@ static void calls_are_recorded(void)
     m.Data[2] = 0x07; m.Data[3] = 0xE0; m.Data[4] = 0x3E; m.Data[5] = 0x01;
     PassThruWriteMsgs(ch, &m, &n, 1000);
     shut(dev);
-    unsetenv("OPENPORT_RECORD");
+    test_setenv("OPENPORT_RECORD", NULL);
     f = fopen(path, "r");
     while (f && fgets(line, sizeof line, f)) {
         lines++;

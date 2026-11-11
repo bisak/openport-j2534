@@ -1122,7 +1122,14 @@ int main(int argc, char **argv)
     if (!out) { perror(tracepath); return 2; }
 
 #ifdef _WIN32
-    if (wineshim_active()) { wine = 1; wineshim_install(stderr); }
+    if (wineshim_active()) {
+        wine = 1;
+#ifndef _WIN64
+        /* For the vendor DLL, which is 32-bit; the shim patches 32-bit
+         * export tables only. */
+        wineshim_install(stderr);
+#endif
+    }
 #endif
     if (!load(libpath)) { fprintf(stderr, "cannot load %s\n", libpath); return 2; }
     BIND(open, "PassThruOpen"); BIND(close, "PassThruClose"); BIND(connect, "PassThruConnect");

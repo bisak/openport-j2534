@@ -15,16 +15,59 @@ BINDIR       ?= $(PREFIX)/bin
 INCLUDEDIR   ?= $(PREFIX)/include
 PCDIR        ?= $(LIBDIR)/pkgconfig
 
+# A Windows build is any build whose compiler targets Windows: MinGW-w64,
+# cross from macOS or Linux or native under MSYS2.
+#   make CC=x86_64-w64-mingw32-gcc      # 64-bit
+#   make CC=i686-w64-mingw32-gcc        # 32-bit; most J2534 applications
+# Everything it makes goes under build/win64 or build/win32, so both can be
+# built from one checkout, beside a native build.
+ifneq ($(findstring mingw,$(shell $(CC) -dumpmachine 2>/dev/null)),)
+  WINDOWS  := 1
+  WIN_BITS := $(if $(findstring x86_64,$(shell $(CC) -dumpmachine)),64,32)
+endif
+
+ifndef WINDOWS
 LIBUSB_CFLAGS := $(shell $(PKG_CONFIG) --cflags libusb-1.0)
 LIBUSB_LIBS   := $(shell $(PKG_CONFIG) --libs libusb-1.0)
 ifeq ($(strip $(LIBUSB_LIBS)),)
 $(error libusb-1.0 not found by $(PKG_CONFIG). Install it: brew install libusb)
 endif
+endif
 
 # A program linked against this checkout finds the library through its rpath,
 # so it runs the checkout's build, not an installed one; install gives the
 # installed copy its own path.
-ifeq ($(UNAME_S),Darwin)
+ifdef WINDOWS
+  # B is where objects go; the programs sit beside the DLL, where Windows
+  # looks for it first. Both DLLs can be copied into one folder, hence the
+  # bits in the name.
+  B          := build/win$(WIN_BITS)/
+  X          := .exe
+  SHLIB      := $(B)openport-j2534-$(WIN_BITS).dll
+  IMPLIB     := $(B)libopenport-j2534-$(WIN_BITS).dll.a
+  TOOLS_DIR  := $(B)
+  EX_DIR     := $(B)
+  TESTS_DIR  := $(B)
+  DLLTOOL    ?= $(patsubst %gcc,%dlltool,$(CC))
+  # 32-bit exports are __stdcall; see src/j2534-x86.def.
+  ifeq ($(WIN_BITS),32)
+    DEF        := src/j2534-x86.def
+    SHLIB_FLAG := -shared -Wl,--kill-at
+    DLLTOOL_FLAGS := --kill-at
+  else
+    DEF        := src/j2534.def
+    SHLIB_FLAG := -shared
+    DLLTOOL_FLAGS :=
+  endif
+  # -static: the DLL carries winpthreads and libgcc, so it needs no other
+  # file beside it.
+  PLATFORM_LIBS := -lsetupapi -lwinmm -static
+  # MinGW's own C99 printf, not Microsoft's: the commands sent to the cable
+  # are formatted with %zu.
+  CPPFLAGS += -D__USE_MINGW_ANSI_STDIO=1
+  # Runs a Windows program: Wine when the build machine is not Windows.
+  RUN ?= $(if $(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)),,wine)
+else ifeq ($(UNAME_S),Darwin)
   SHLIB_EXT  := dylib
   SHLIB_FLAG := -dynamiclib -install_name @rpath/$(LIBNAME).dylib
   INSTALL_ID  = install_name_tool -id $(LIBDIR)/$(SHLIB) $(DESTDIR)$(LIBDIR)/$(SHLIB)
@@ -34,7 +77,18 @@ else
   SHLIB_FLAG := -shared -Wl,-soname,$(LIBNAME).so
   INSTALL_ID  = true
 endif
-IN_TREE := -L. -lj2534 -Wl,-rpath,$(CURDIR)
+ifdef WINDOWS
+IN_TREE := $(IMPLIB)
+else
+B         :=
+X         :=
+SHLIB     := $(LIBNAME).$(SHLIB_EXT)
+TOOLS_DIR := tools/
+EX_DIR    := examples/
+TESTS_DIR := tests/
+PIC       := -fPIC
+IN_TREE   := -L. -lj2534 -Wl,-rpath,$(CURDIR)
+endif
 
 # ARCHS lets CI build a fat binary: make ARCHS="arm64 x86_64"
 ARCHS      ?=
@@ -46,24 +100,34 @@ WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion \
 CFLAGS   ?= -O2 -g
 CPPFLAGS += -Iinclude -Isrc -std=c11 -DOPENPORT_VERSION='"$(VERSION)"' \
             -D_POSIX_C_SOURCE=200809L $(LIBUSB_CFLAGS)
-LDLIBS   += $(LIBUSB_LIBS) $(PLATFORM_LIBS) -lpthread
+LDLIBS   += $(LIBUSB_LIBS) -lpthread $(PLATFORM_LIBS)
 
-SHLIB    := $(LIBNAME).$(SHLIB_EXT)
-SRCS     := src/op_proto.c src/op_log.c src/op_error.c src/op_usb.c \
-            src/op_serial.c src/op_device.c src/op_j2534.c
-OBJS     := $(SRCS:.c=.o)
+# The byte pipe to the cable is the one part that differs by platform.
+ifdef WINDOWS
+TRANSPORT_SRCS := src/op_win.c
+DLL_SRCS       := src/op_winreg.c
+PROBE_SRC      := tools/probe/op_probe_win.c
+else
+TRANSPORT_SRCS := src/op_usb.c src/op_serial.c
+DLL_SRCS       :=
+PROBE_SRC      := tools/probe/op_probe.c
+endif
+SRCS     := src/op_proto.c src/op_log.c src/op_error.c $(TRANSPORT_SRCS) \
+            src/op_device.c src/op_j2534.c
+OBJS     := $(patsubst %.c,$(B)%.o,$(SRCS) $(DLL_SRCS))
 
 TEST_SRCS := tests/unit/test_main.c tests/unit/test_proto.c \
              tests/unit/test_frames.c tests/unit/test_j2534.c \
              tests/unit/test_golden.c \
              tests/mock/mock_transport.c
-TEST_BIN  := tests/run_tests
+TEST_BIN  := $(TESTS_DIR)run_tests$(X)
 
 .PHONY: all clean test check install uninstall probe tools format smoke kline iso15765
 all: $(SHLIB) probe
 
-%.o: %.c
-	$(CC) $(ARCH_FLAGS) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -MMD -MP -fPIC -c $< -o $@
+$(B)%.o: %.c
+	@mkdir -p $(@D)
+	$(CC) $(ARCH_FLAGS) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -MMD -MP $(PIC) -c $< -o $@
 
 # Rebuild an object when a header it includes changes: a struct edited in
 # op_device.h otherwise links old and new layouts into one library. The
@@ -71,22 +135,36 @@ all: $(SHLIB) probe
 -include $(OBJS:.o=.d)
 $(OBJS): Makefile
 
+ifdef WINDOWS
+# The import library is what a C program links against; the examples do.
+$(SHLIB): $(OBJS) $(DEF) Makefile
+	$(CC) $(SHLIB_FLAG) $(OBJS) $(DEF) $(LDLIBS) -o $@
+	$(DLLTOOL) $(DLLTOOL_FLAGS) -d $(DEF) -D $(notdir $(SHLIB)) -l $(IMPLIB)
+else
 $(SHLIB): $(OBJS) Makefile
 	$(CC) $(ARCH_FLAGS) $(SHLIB_FLAG) $(OBJS) $(LDLIBS) -o $@
+endif
 
-probe: tools/op_probe
-tools/op_probe: tools/probe/op_probe.c
+PROBE_BIN := $(TOOLS_DIR)op_probe$(X)
+probe: $(PROBE_BIN)
+$(PROBE_BIN): $(PROBE_SRC)
+	@mkdir -p $(@D)
 	$(CC) $(ARCH_FLAGS) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $< $(LDLIBS) -o $@
 
 # The unit tests link the library sources directly and inject a mock
 # transport, so `make test` passes with no cable attached.
 $(TEST_BIN): $(TEST_SRCS) $(SRCS)
+	@mkdir -p $(@D)
 	$(CC) $(ARCH_FLAGS) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -Itests -Itests/mock -Itests/unit \
 	      $(TEST_SRCS) $(SRCS) $(LDLIBS) -o $@
 
 test check: $(TEST_BIN)
-	./$(TEST_BIN)
+	$(RUN) ./$(TEST_BIN)
 
+ifdef WINDOWS
+install uninstall:
+	@echo "Windows has no install step: keep $(SHLIB) where you want it and run regsvr32 on it (README.md)." >&2; exit 1
+else
 install: $(SHLIB) probe
 	install -d $(DESTDIR)$(LIBDIR) $(DESTDIR)$(INCLUDEDIR)/j2534 $(DESTDIR)$(PCDIR) $(DESTDIR)$(BINDIR)
 	install -m 644 include/j2534/j2534.h $(DESTDIR)$(INCLUDEDIR)/j2534/
@@ -101,26 +179,27 @@ uninstall:
 	rm -f $(DESTDIR)$(LIBDIR)/$(SHLIB) $(DESTDIR)$(BINDIR)/op_probe \
 	      $(DESTDIR)$(INCLUDEDIR)/j2534/j2534.h \
 	      $(DESTDIR)$(PCDIR)/openport-j2534.pc
+endif
 
+# A native clean leaves the Windows builds alone, and the other way round.
 clean:
+ifdef WINDOWS
+	rm -rf $(B)
+else
 	rm -f $(OBJS) $(OBJS:.o=.d) $(SHLIB) $(TEST_BIN) tools/op_probe examples/op_smoke examples/op_kline examples/op_iso15765
 	rm -rf *.dSYM tests/*.dSYM tools/*.dSYM
+endif
 
-smoke: examples/op_smoke
-examples/op_smoke: examples/op_smoke.c $(SHLIB)
+smoke: $(EX_DIR)op_smoke$(X)
+kline: $(EX_DIR)op_kline$(X)
+iso15765: $(EX_DIR)op_iso15765$(X)
+$(EX_DIR)op_%$(X): examples/op_%.c $(SHLIB)
 	$(CC) $(ARCH_FLAGS) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $< \
 	      $(IN_TREE) $(LDLIBS) -o $@
 
-kline: examples/op_kline
-examples/op_kline: examples/op_kline.c $(SHLIB)
-	$(CC) $(ARCH_FLAGS) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $< \
-	      $(IN_TREE) $(LDLIBS) -o $@
-
-iso15765: examples/op_iso15765
-examples/op_iso15765: examples/op_iso15765.c $(SHLIB)
-	$(CC) $(ARCH_FLAGS) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $< \
-	      $(IN_TREE) $(LDLIBS) -o $@
-
+# Everything below is the native test rig: it needs ptys, sanitizers and
+# dlopen. The Windows build is tested by `make test` and `make wine-sim`.
+ifndef WINDOWS
 # ---- differential harness -------------------------------------------------
 # Path to the reference libj2534.dylib to compare against: make differential OLD_DRIVER=...
 OLD_DRIVER ?=
@@ -190,5 +269,13 @@ fuzz-deep:
 sim: $(SHLIB)
 	OPENPORT_LIB=$(CURDIR)/$(SHLIB) python3 tests/sim/run_scenarios.py
 
+# The Windows DLLs under Wine against this build, on the simulator
+# (docs/TESTING.md). Needs MinGW-w64 and Wine, so check-all leaves it out.
+.PHONY: wine-sim
+wine-sim: $(SHLIB)
+	tests/windows/run_wine.sh 32
+	tests/windows/run_wine.sh 64
+
 check-all: test sanitize sanitize-thread fuzz sim
 	@echo "all hardware-free layers passed"
+endif

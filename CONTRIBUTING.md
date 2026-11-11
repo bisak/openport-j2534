@@ -37,7 +37,8 @@ A change is ready when:
 
 - `make test` passes with no cable attached;
 - `make CFLAGS="-O2 -g -Werror"` builds cleanly on macOS and on Linux (a
-  container is enough);
+  container is enough), and with `CC=i686-w64-mingw32-gcc` and
+  `CC=x86_64-w64-mingw32-gcc` for Windows;
 - anything measured on a cable or a vehicle is written down in
   [docs/PROTOCOL.md](docs/PROTOCOL.md), with the date, how it was measured and
   a confidence marker ([V], [P] or [U]);
@@ -68,15 +69,17 @@ A change is ready when:
 | `src/op_device.c` | Channels, the reader thread, reassembly, matching replies to commands |
 | `src/op_proto.c` | Encoding commands and decoding replies; no I/O, fully unit-tested |
 | `src/op_transport.h`, `op_usb.c`, `op_serial.c` | The byte pipe to the cable: libusb, or the serial device |
+| `src/op_win.c`, `op_winreg.c`, `j2534*.def` | Windows: the byte pipe, `regsvr32` registration, the DLL's exports |
 | `src/op_log.c`, `op_error.c` | `OPENPORT_LOG`, and the `PassThruGetLastError` text |
 | `examples/` | `op_smoke`, `op_iso15765`, `op_kline`: end-to-end checks on a cable |
 | `tests/unit/`, `tests/mock/` | Unit tests over a mock transport, and vehicle recordings |
 | `tests/sim/` | A simulated cable behind a pty, with fault injection |
+| `tests/windows/` | The Windows DLL under Wine against the native library |
 | `tests/fuzz/` | Fuzzer for the reply parser |
 | `tests/differential/` | Comparison with another J2534 library |
 | `tools/ab-official/` | Comparison with Tactrix's Windows DLL, run under Wine in Docker |
 | `tools/car/` | Read-only vehicle capture and analysis |
-| `tools/probe/`, `tools/usbtap/` | USB descriptor dump; USB traffic recorder (macOS) |
+| `tools/probe/`, `tools/usbtap/` | USB descriptor dump, and on Windows which driver the cable has; USB traffic recorder (macOS) |
 
 ## License
 

@@ -2,6 +2,7 @@
  * op_proto.c — OpenPort wire-protocol codec. See op_proto.h.
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
+#include "op_printf.h"
 #include "op_proto.h"
 
 #include <stdarg.h>
@@ -321,7 +322,7 @@ size_t op_resync_offset(const uint8_t *buf, size_t len)
 
 /* snprintf returns the length it *would* have written; treat truncation and
  * encoding errors alike as failure so no caller ever transmits a partial line. */
-__attribute__((format(printf, 3, 4)))
+OP_PRINTF(3, 4)
 static size_t emit(char *out, size_t out_sz, const char *fmt, ...)
 {
     va_list ap;

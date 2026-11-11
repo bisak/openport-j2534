@@ -19,6 +19,8 @@ make check-all
 | `make ab-official AB_DLL=…` | Tactrix's DLL and this driver, side by side, on the simulator | Apple Silicon Mac, Docker, mingw-w64, the DLL |
 | `make ab-official-cable AB_DLL=… CABLE=…` | The same on the cable | the above, and the cable |
 | `make differential OLD_DRIVER=…` | This driver and the one it replaced | macOS; add `DIFF_ARGS=--hardware` and the cable for the full run |
+| `make CC=i686-w64-mingw32-gcc test` | The unit tests, built for Windows and run under Wine (`x86_64-w64-mingw32-gcc` for 64-bit) | MinGW-w64, Wine |
+| `make wine-sim` | The Windows DLLs and the native library, side by side, on the simulator | MinGW-w64, Wine, Python 3 |
 | `./examples/op_smoke` | Open, read versions and voltages, close (after `make smoke`) | the cable |
 | `tools/car/car-session.sh` | A read-only vehicle session | a vehicle |
 
@@ -151,6 +153,49 @@ multi-frame transmits and a side-by-side run of both drivers (2026-09-24).
 
 [CAR-SESSION.md](CAR-SESSION.md) describes a read-only session. Its recordings
 become layer 3's fixtures.
+
+## The Windows build
+
+No machine running Windows has run this driver yet. What has been run is the
+Windows build under Wine, which executes the same DLL and implements the Win32
+calls it makes; Wine's serial port is not Windows' `usbser.sys` or Tactrix's
+driver, and that part is still open (below).
+
+| Command | What it checks |
+|---|---|
+| `make CC=i686-w64-mingw32-gcc test` | The unit tests of layer 3, compiled for Windows. Everything above the byte pipe is the same code as elsewhere, but `unsigned long` is 4 bytes there. This found a transmit timeout above 2^31 ms read as negative, and the sequence-number seed overflowing. |
+| `make wine-sim` | `tests/windows/run_wine.sh` for both widths: the DLL under Wine and the native library run `tools/ab-official/j2534_trace.c`'s scenarios against the simulator, and every step's result and every command on the wire must be the same. This runs `src/op_win.c`, which the unit tests replace with the mock. |
+| `tests/windows/run_wine.sh 32 --cable /dev/ttyACM0` | The same on a cable. Three things differ from run to run there and are reported as differences: the battery voltage, the periodic message ids (the cable keeps counting them while powered), and which frames a live ECU happened to broadcast during a raw CAN read. |
+
+`run_wine.sh` takes scenario names after `--`, as `make ab-official` does:
+`-- sweep`, `-- kline edge`, `-- bench --cycles 200`.
+
+Run on 2026-11-11 (Wine 9.0, Ubuntu 24.04, MinGW-w64 GCC, cable firmware
+1.17.4877), 32-bit and 64-bit alike unless noted:
+
+| Run | Result |
+|---|---|
+| Unit tests | 654 checks, 0 failures |
+| Simulator, default scenarios | 67 steps, 0 differ, wire identical |
+| Simulator, `sweep` | 679 steps, 0 differ, wire identical |
+| Simulator, `kline edge` (32-bit) | 53 steps, 0 differ, wire identical |
+| Cable and bench ECU, default scenarios | 67 steps; only the battery voltage, the periodic ids and the ECU's broadcast frames differ |
+| Cable and bench ECU, `bench --cycles 200` (32-bit) | 407 steps, 0 differ, wire identical |
+| `op_iso15765.exe` on the bench ECU (32-bit) | single-frame and multi-frame replies and raw CAN, as the native build delivers them |
+| Simulator killed mid-session (32-bit) | every later call fails with `ERR_DEVICE_NOT_CONNECTED` within 0.6 s |
+| `regsvr32`, `regsvr32 /u` | each DLL's key appears in, and leaves, its own registry view |
+| Opening through Tactrix's interface class | found and opened with `tools/ab-official/iface.reg` imported and the interface linked to the cable |
+
+Still open, and only a Windows machine can close it:
+
+- that Windows 10 and later give a cable with no vendor driver a COM port, and
+  that the library finds it by USB id;
+- reads and writes through Tactrix's driver, and whether it accepts the
+  exclusive open the library asks for;
+- the read timeouts `src/op_win.c` sets on a COM port. Wine 9.0 does not
+  implement that combination, so under Wine the library sets another one;
+- which error an unplugged cable gives through each driver;
+- a real J2534 application loading the registered DLL.
 
 ## The bug every layer missed
 

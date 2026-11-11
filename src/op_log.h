@@ -10,12 +10,13 @@
 #ifndef OP_LOG_H
 #define OP_LOG_H
 
+#include "op_printf.h"
 #include <stddef.h>
 #include <stdint.h>
 
 void op_log_init(void);
 
-void op_logf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void op_logf(const char *fmt, ...) OP_PRINTF(1, 2);
 void op_log_bytes(const char *tag, const uint8_t *buf, size_t len);
 
 #endif /* OP_LOG_H */

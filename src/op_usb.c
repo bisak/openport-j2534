@@ -36,6 +36,7 @@
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE /* pthread_set_qos_class_self_np */
 #endif
+#include "op_printf.h"
 #include "op_transport.h"
 #include "op_log.h"
 #include "op_time.h"
@@ -111,7 +112,7 @@ struct op_usb {
 
 static _Thread_local char g_detail[256];
 
-__attribute__((format(printf, 1, 2)))
+OP_PRINTF(1, 2)
 static void set_detail(const char *fmt, ...)
 {
     va_list ap;
