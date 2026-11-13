@@ -114,6 +114,9 @@ bus.
 | `thread_writes --cycles 300`, both widths and Tactrix's DLL | 15,000 of 15,000 frames sent, in order |
 | ECU reads, 200 rounds | The same replies and round trips as Tactrix's DLL |
 | A second program opening the cable | `ERR_DEVICE_IN_USE`. The first session continues. |
+| Soak: a CAN stream, a periodic message, ECU reads, filters, configuration, and a channel opened and closed every 30 s, 5 to 7 minutes per DLL (2026-11-13) | Both widths and Tactrix's DLL alike: no read error, overflow, or backwards timestamp, and memory and handles flat. Both DLLs hit the firmware's periodic-message limit after channel closes ([PROTOCOL.md §10](PROTOCOL.md)) |
+| 1,225 read-only requests from recorded GTS+ sessions, replayed through both DLLs | The same results, except where Tactrix's DLL answers a second open with "no devices available" and this driver with `ERR_DEVICE_IN_USE` |
+| Bench supply cut for 5 s mid-session | Both DLLs: transmits fail with `ERR_TIMEOUT` while the ECU is off, nothing hangs, and the session continues when power returns |
 
 The next table counts frames lost from the cable's 3 × 1 ms load over 30 s,
 on a bus carrying about 3,100 frames a second. "Frozen" suspends the reading
@@ -151,7 +154,7 @@ The session also found:
 - `pnputil /restart-device` waits while the cable is open, so software cannot
   detach the cable.
 
-A detach mid-session and the path through Windows' own USB serial driver,
+A USB detach mid-session and the path through Windows' own USB serial driver,
 `usbser.sys`, were last tested on 2026-11-11 in a virtual machine, with an
 earlier version of the Windows transport. To test that path, remove Tactrix's
 driver package (`pnputil /delete-driver … /uninstall`). Windows then gives the

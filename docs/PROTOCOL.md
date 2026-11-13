@@ -656,7 +656,8 @@ Firmware periodic messages (`atm`):
 | Timing | every 100 ms gave frames 100.0 ms apart. 1 ms and 5 ms intervals also hold |
 | Visibility | with `LOOPBACK` on, each transmission shows as the frame plus the `0x20` echo. No `0x10` transmit indication |
 | `atn` | answers in about 60 ms. The id then answers `are 13` |
-| `atc`, `ata` and `atz` | each stops every periodic message on the channel |
+| `atc`, `ata` and `atz` | each stops every periodic message, on every channel: closing a K-line channel stopped those on channels 5 and 6 (2026-11-13, through both DLLs) |
+| Started after another channel's `atc` | `atn` answers `are 13` for it, yet it keeps sending until its own channel closes or `atl` clears it. The firmware also keeps the slots of the messages that `atc` stopped: after about 10 such stops, `atm` answers `are 12`. Measured 2026-11-13, through both DLLs alike |
 | Host process killed | the message keeps running until `atn` |
 | How many | 10 per channel. The eleventh `atm` answers `are 12` |
 | Interval 0 | accepted (`arm`), and sends nothing |
