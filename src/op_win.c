@@ -185,7 +185,7 @@ static op_status win_write(op_transport *t, const uint8_t *buf, size_t len,
     deadline = now_ms() + (timeout_ms ? timeout_ms : 1u) + OP_WRITE_GRACE_MS;
     atomic_store_explicit(&w->wr_issued_us, now_us(), memory_order_relaxed);
     /* One WriteFile carries the whole command: the cable rejects a payload
-     * that arrives late (PROTOCOL.md section 1). */
+     * that arrives late (PROTOCOL.md section 2). */
     while (done < len) {
         HANDLE ev = w->wr.hEvent;
         DWORD n = 0, e;

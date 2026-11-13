@@ -127,7 +127,7 @@ def wire_equivalence(vendor_tap, ours_tap, P):
     P("|---|---|---|")
     P("| commands on the wire | %d | %d |" % (len(v), len(o)))
     P("| of which open/close handshake (`ati`/`ata`/`atz`) | %d | %d |" % (sum(1 for c in v if c[0] in handshake), sum(1 for c in o if c[0] in handshake)))
-    P("| transmits carrying the vendor's constant 1000000 budget argument | %d | %d |" % (vbudget, obudget))
+    P("| transmits carrying a 1000000 budget argument | %d | %d |" % (vbudget, obudget))
     P("| compared (everything else) | %d | %d |" % (len(vb), len(ob)))
     P("| payload bytes | %d | %d |" % (sum(len(c[3]) for c in v), sum(len(c[3]) for c in o)))
     if vb == ob:
@@ -198,15 +198,15 @@ def wire_per_step(vendor_tap, ours_tap, vs, os_, keys, P):
 
 KNOWN_ARGS = {"ato": 3, "att": 2, "atf": 3, "ats": 2, "atk": 1, "atc": 0, "atg": 1, "atz": 0, "ata": 0,
               "atr": 1, "atv": 2, "atp": 2, "atm": 4, "atn": 1, "atl": 0, "aty": 2, "atw": 1}
-BUDGET = "1000000"     # the vendor DLL's constant fourth att argument (PROTOCOL.md section 4)
+BUDGET = "1000000"     # att's fourth argument for a 1 s Timeout, or 0 on most channels (PROTOCOL.md section 4)
 stats = {"budget": 0}
 
 
 def norm_args(verb, args):
     """Strip what legitimately differs between two correct drivers: the
     trailing sequence number (both number their commands, from different
-    starts) and the vendor's constant transmit-budget argument, which is
-    counted rather than compared."""
+    starts) and the transmit-budget argument, the caller's Timeout in
+    microseconds, which is counted rather than compared."""
     a = args.split()
     k = KNOWN_ARGS.get(verb, len(a))
     if len(a) > k:

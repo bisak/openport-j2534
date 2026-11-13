@@ -575,7 +575,7 @@ static long write_one(op_device *d, J_U32 channel, const PASSTHRU_MSG *m,
                 (unsigned long)channel);
 
     /* The firmware's transmit budget, as the vendor DLL sets it: the caller's
-     * Timeout in microseconds, one second for a Timeout of 0. */
+     * Timeout in microseconds, or for a Timeout of 0 the budget above. */
     if (timeout_ms != 0)
         budget_us = timeout_ms > 4294967u ? 4294967295u : timeout_ms * 1000u;
     n = op_cmd_transmit(line, sizeof line, (unsigned)channel,

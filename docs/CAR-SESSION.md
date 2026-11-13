@@ -205,7 +205,7 @@ The sections, in run order, are below. Section numbers (§) refer to
 | q9 | the transmit echo with `LOOPBACK` on ISO 15765 | settled on the bench ECU: echoes on channel 5 (§7.7) |
 | q10 | raw CAN frames and what reaches the port, and `SNIFF_MODE` (receive only) | settled (§7.8, §10) |
 | q11 | which configuration parameters the firmware knows, and their defaults | settled (§8) |
-| q5 | `atx` (bench only, `--unknown-verbs`) | open, unimportant |
+| q5 | `atx` (bench only, `--unknown-verbs`) | may restart the cable into its bootloader (PROTOCOL.md section 4) |
 | q6 | two-digit protocol numbers, the five-argument `ato` | settled (§5, §12) |
 | `--long-read ADDR` | chunking of a long reply | settled on the bench ECU: 70-byte chunks, the id on each (§7.6) |
 | `--tp20` | VW TP2.0 on raw CAN, and the EDC16 flash counters | settled on the Audi's engine module (§11) |

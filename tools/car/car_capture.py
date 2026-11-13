@@ -821,7 +821,7 @@ def count_frames(buf):
 def q5_unknown(p):
     emit("\n### Q5. atm / atw / atx on a live channel")
     emit("atm is the periodic message and atw the five-baud init (PROTOCOL.md section 4);")
-    emit("atx is still unknown. Not read-only by construction, so this section only")
+    emit("atx may restart the cable into its bootloader (PROTOCOL.md section 4). Not read-only, so this section only")
     emit("runs with --unknown-verbs, ideally with the cable on a bench.")
     p.resync()
     p.cmd(b"ato6 0 500000 0\r\n", wait=0.8, show=False)

@@ -785,11 +785,10 @@ class OpenPortSim:
             threading.Timer(0.01, lambda: self.send_message(ch, resp)).start()
 
     def _cmd_pin_verb_p(self, rest, payload):
-        """`atp <pin> <value>`: a pin verb sharing `atv`'s argument shape, not
-        a periodic message. Measured 2026-09-13 with the cable: every
-        (pin, value) tried answers `are 10`, except value 0 which answers
-        `are 5`; the reply takes ~0.5 s. Its function is unknown and the
-        vendor DLL is not seen sending it."""
+        """`atp <service> <len>`: the application-service request (PROTOCOL.md
+        section 4), which Tactrix's DLL sends only from its firmware updater.
+        Measured 2026-09-13 with the cable: a second argument of 0 answers
+        `are 5`, every other value tried `are 10`; the reply takes ~0.5 s."""
         args = rest.strip().split()
         if len(args) < 2: return self._err(ERR_FAILED)
         try: value = int(args[1])
