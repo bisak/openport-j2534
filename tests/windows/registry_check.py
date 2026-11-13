@@ -8,9 +8,11 @@ finds it, on Windows.
 Run it from an administrator prompt, with a Python of the DLL's width (a
 32-bit Python for the 32-bit DLL). It registers the DLL with regsvr32, reads
 the key back from the registry view an application of that width reads, loads
-the DLL from the key's FunctionLibrary path, opens the cable (or, with none
-attached, expects ERR_DEVICE_NOT_CONNECTED), unregisters it, and checks the
-registry is as it was. Exit status 0 means every check passed.
+the DLL from the key's FunctionLibrary path, checks every J2534 function
+is reachable by name and by the ordinal Tactrix's DLL gives it, opens the cable
+(or, with none attached, expects ERR_DEVICE_NOT_CONNECTED), unregisters it, and
+checks the registry is as it was: the shared parent key may go only if it held
+nothing else. Exit status 0 means every check passed.
 
 SPDX-License-Identifier: GPL-3.0-or-later
 """
@@ -31,6 +33,11 @@ EXPECTED = {
     "J1850PWM": 0, "J1850VPW": 0,
 }
 ERR_DEVICE_NOT_CONNECTED = 8
+# Tactrix's op20pt32.dll numbers the 14 functions alphabetically.
+ORDINALS = ["PassThruClose", "PassThruConnect", "PassThruDisconnect", "PassThruGetLastError",
+            "PassThruIoctl", "PassThruOpen", "PassThruReadMsgs", "PassThruReadVersion",
+            "PassThruSetProgrammingVoltage", "PassThruStartMsgFilter", "PassThruStartPeriodicMsg",
+            "PassThruStopMsgFilter", "PassThruStopPeriodicMsg", "PassThruWriteMsgs"]
 
 failures = 0
 
@@ -71,6 +78,12 @@ def exists(path, bits):
         return False
 
 
+def empty(path, bits):
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | view_flag(bits)) as k:
+        subkeys, values, _ = winreg.QueryInfoKey(k)
+        return subkeys == 0 and values == 0
+
+
 def regsvr32(dll, unregister=False):
     # From a process of the DLL's width, System32 is the regsvr32 of that
     # width: a 32-bit process is redirected to SysWOW64.
@@ -85,6 +98,10 @@ def main():
     bits = struct.calcsize("P") * 8
     print(f"DLL {dll}, a {bits}-bit Python")
     parent_before = exists(PARENT, bits)
+    parent_was_empty = parent_before and empty(PARENT, bits)
+    other = 64 if bits == 32 else 32
+    os_64 = bits == 64 or "PROCESSOR_ARCHITEW6432" in os.environ
+    other_before = os_64 and read_key(other) is not None
     if read_key(bits) is not None:
         sys.exit("an openport-j2534 key is already registered; unregister it first")
 
@@ -96,6 +113,8 @@ def main():
         check(values.get(name) == want, f"{name} = {want!r}", repr(values.get(name)))
     check(os.path.normcase(values.get("FunctionLibrary", "")) == os.path.normcase(dll),
           "FunctionLibrary is the DLL's own path", values.get("FunctionLibrary"))
+    if os_64 and not other_before:
+        check(read_key(other) is None, f"nothing written to the {other}-bit view")
 
     lib = ctypes.WinDLL(values.get("FunctionLibrary", dll))
     for f in ("PassThruOpen", "PassThruClose", "PassThruConnect", "PassThruDisconnect",
@@ -104,6 +123,12 @@ def main():
               "PassThruSetProgrammingVoltage", "PassThruReadVersion",
               "PassThruGetLastError", "PassThruIoctl"):
         check(hasattr(lib, f), f"{f} is exported under its plain name")
+    for n, f in enumerate(ORDINALS, 1):
+        try:
+            same = ctypes.cast(lib[n], ctypes.c_void_p).value == ctypes.cast(getattr(lib, f), ctypes.c_void_p).value
+        except (AttributeError, OSError):
+            same = False
+        check(same, f"ordinal {n} is {f}")
     dev = ctypes.c_ulong()
     rc = lib.PassThruOpen(None, ctypes.byref(dev))
     text = ctypes.create_string_buffer(80)
@@ -121,7 +146,8 @@ def main():
 
     check(regsvr32(dll, unregister=True) == 0, "regsvr32 /u unregisters the DLL")
     check(read_key(bits) is None, "the key is gone")
-    check(exists(PARENT, bits) == parent_before,
+    parent_after = exists(PARENT, bits)
+    check(parent_after == parent_before or (parent_was_empty and not parent_after),
           "PassThruSupport.04.04 is as it was" + ("" if parent_before else " (absent)"))
     print(f"\n{'all checks passed' if not failures else f'{failures} check(s) failed'}")
     return 1 if failures else 0

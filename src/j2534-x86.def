@@ -4,20 +4,22 @@
 ; is made from this file by `dlltool --kill-at` so that it maps each
 ; decorated symbol to its plain export.
 ; SPDX-License-Identifier: GPL-3.0-or-later
+; Ordinals as Tactrix's op20pt32.dll numbers them (alphabetical, 1-14),
+; for an application that imports by ordinal.
 EXPORTS
-    PassThruOpen@8
-    PassThruClose@4
-    PassThruConnect@20
-    PassThruDisconnect@4
-    PassThruReadMsgs@16
-    PassThruWriteMsgs@16
-    PassThruStartPeriodicMsg@16
-    PassThruStopPeriodicMsg@8
-    PassThruStartMsgFilter@24
-    PassThruStopMsgFilter@8
-    PassThruSetProgrammingVoltage@12
-    PassThruReadVersion@16
-    PassThruGetLastError@4
-    PassThruIoctl@16
-    DllRegisterServer@0 PRIVATE
-    DllUnregisterServer@0 PRIVATE
+    PassThruClose@4 @1
+    PassThruConnect@20 @2
+    PassThruDisconnect@4 @3
+    PassThruGetLastError@4 @4
+    PassThruIoctl@16 @5
+    PassThruOpen@8 @6
+    PassThruReadMsgs@16 @7
+    PassThruReadVersion@16 @8
+    PassThruSetProgrammingVoltage@12 @9
+    PassThruStartMsgFilter@24 @10
+    PassThruStartPeriodicMsg@16 @11
+    PassThruStopMsgFilter@8 @12
+    PassThruStopPeriodicMsg@8 @13
+    PassThruWriteMsgs@16 @14
+    DllRegisterServer@0 @15 PRIVATE
+    DllUnregisterServer@0 @16 PRIVATE

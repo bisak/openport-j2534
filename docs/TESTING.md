@@ -186,7 +186,7 @@ builds them.
 | Unit tests, both widths | 655 checks, 0 failures |
 | Simulator over a named pipe, 64-bit | 57 passed, 0 failed, a 20,000-frame burst included |
 | Both DLLs against the simulator, `j2534_trace` default scenarios | 67 steps, the same as the native library's on macOS |
-| `registry_check.py`, 64-bit; `regsvr32` by hand, 32-bit | every check passes; each key only in its own view, with Tactrix's protocol entries; removed without a trace |
+| `registry_check.py`, 64-bit; `regsvr32` by hand, 32-bit | every check passes; each key only in its own view, with Tactrix's protocol entries; removed without a trace (the shared parent key goes too when nothing else is left in it) |
 | Against Tactrix's DLL, default scenarios and `sweep` (32-bit) | the same results in over 1,450 steps but for the return codes listed in [AB-OFFICIAL.md](AB-OFFICIAL.md#return-codes); the final DLL again in 1,368 steps (`sweep_connect` left out) |
 | 32-bit against 64-bit, default scenarios | the same results |
 | `thread_writes --cycles 300`, both widths and Tactrix's DLL | 15,000 of 15,000 frames sent, in order, no write failed |

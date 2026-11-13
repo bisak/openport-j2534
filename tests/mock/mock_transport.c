@@ -49,6 +49,16 @@ static void note_seq(const char *line, size_t len)
     g_last_seq[end - start] = '\0';
 }
 
+/* PROTOCOL.md section 3: the cable answers nothing to a transmit without a
+ * number, `att<ch> <len> <flags> <budget>`; a numbered one has a fifth field. */
+static int unnumbered_transmit(const char *line, size_t len)
+{
+    size_t i, spaces = 0;
+    if (len < 3 || strncmp(line, "att", 3) != 0) return 0;
+    for (i = 0; i < len; i++) if (line[i] == ' ') spaces++;
+    return spaces == 3;
+}
+
 void mock_push_reply(const char *text)
 {
     char out[256];
@@ -191,7 +201,7 @@ static void feed_locked(const uint8_t *buf, size_t len)
             if (g_pending_len < sizeof g_pending) g_pending[g_pending_len++] = ch;
             if (--g_await_payload == 0) {
                 mock_responder fn = g_responder;
-                if (fn != NULL) {
+                if (fn != NULL && !unnumbered_transmit((const char *)g_line, g_line_len)) {
                     note_seq((const char *)g_line, g_line_len);
                     pthread_mutex_unlock(&g_lock);
                     fn((const char *)g_line, g_line_len, g_pending, g_pending_len);
@@ -213,7 +223,7 @@ static void feed_locked(const uint8_t *buf, size_t len)
                 g_pending_len = 0;
             } else {
                 mock_responder fn = g_responder;
-                if (fn != NULL) {
+                if (fn != NULL && !unnumbered_transmit((const char *)g_line, g_line_len)) {
                     note_seq((const char *)g_line, g_line_len);
                     pthread_mutex_unlock(&g_lock);
                     fn((const char *)g_line, g_line_len, NULL, 0);

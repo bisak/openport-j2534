@@ -92,7 +92,10 @@ typedef struct {
     unsigned   nreads, head;
     size_t     head_len, head_pos;  /* head's bytes in hand, and handed out */
     int        started;
-    int        gone;            /* a read found the cable gone */
+    /* The handle can no longer be trusted: a read failed, or a write could
+     * not be cancelled. Set by either thread, so atomic. */
+    atomic_int gone;
+    int        wr_stuck;        /* w->wr is still with the driver */
     /* The most reads found complete when the reader came for the oldest: all
      * of them means the pipe went unpolled and the cable may have discarded
      * frames. Close logs it. */
@@ -154,6 +157,17 @@ static ULONGLONG now_ms(void)
     return now_us() / 1000u;
 }
 
+/* WaitForSingleObject until a deadline on now_ms(), which may be further off
+ * than a DWORD reaches; a single wait could also come out as INFINITE. */
+static DWORD wait_until(HANDLE ev, ULONGLONG deadline)
+{
+    for (;;) {
+        ULONGLONG now = now_ms(), left = now < deadline ? deadline - now : 0;
+        DWORD r = WaitForSingleObject(ev, left > 0x7FFFFFFFu ? 0x7FFFFFFFu : (DWORD)left);
+        if (r != WAIT_TIMEOUT || left <= 0x7FFFFFFFu) return r;
+    }
+}
+
 static op_status win_write(op_transport *t, const uint8_t *buf, size_t len,
                            unsigned timeout_ms)
 {
@@ -164,6 +178,7 @@ static op_status win_write(op_transport *t, const uint8_t *buf, size_t len,
     if (t == NULL || t->impl == NULL || (buf == NULL && len > 0) || len > MAXDWORD)
         return OP_ERR_PARAM;
     w = (op_win *)t->impl;
+    if (atomic_load(&w->gone)) return OP_ERR_NO_DEVICE;
     if (len == 0) return OP_OK;
 
     op_log_bytes("TX", buf, len);
@@ -173,7 +188,6 @@ static op_status win_write(op_transport *t, const uint8_t *buf, size_t len,
      * that arrives late (PROTOCOL.md section 1). */
     while (done < len) {
         HANDLE ev = w->wr.hEvent;
-        ULONGLONG now;
         DWORD n = 0, e;
 
         memset(&w->wr, 0, sizeof w->wr);
@@ -184,12 +198,18 @@ static op_status win_write(op_transport *t, const uint8_t *buf, size_t len,
             op_logf("write: error %lu", (unsigned long)e);
             return from_io_error(e);
         }
-        now = now_ms();
-        if (WaitForSingleObject(ev, now < deadline ? (DWORD)(deadline - now) : 0)
-            != WAIT_OBJECT_0) {
-            /* Cancelled, then reaped: the write may have finished first. */
+        if (wait_until(ev, deadline) != WAIT_OBJECT_0) {
+            /* Cancelled, then reaped: the write may have finished first. A
+             * driver that does not complete the cancel within a second keeps
+             * w->wr and the caller's buffer, so the handle is given up. */
             CancelIoEx(w->h, &w->wr);
-            if (GetOverlappedResult(w->h, &w->wr, &n, TRUE) && done + n >= len) return OP_OK;
+            if (WaitForSingleObject(ev, 1000) != WAIT_OBJECT_0) {
+                op_logf("write: the driver did not give the write back; the cable is given up");
+                w->wr_stuck = 1;
+                atomic_store(&w->gone, 1);
+                return OP_ERR_NO_DEVICE;
+            }
+            if (GetOverlappedResult(w->h, &w->wr, &n, FALSE) && done + n >= len) return OP_OK;
             op_logf("write: the cable took %zu of %zu bytes before the time ran out",
                     done + (size_t)w->wr.InternalHigh, len);
             return OP_ERR_STALLED;
@@ -205,8 +225,7 @@ static op_status win_write(op_transport *t, const uint8_t *buf, size_t len,
     return OP_OK;
 }
 
-/* Posts one read; a slot that cannot be posted is tried again when the
- * reader reaches it. */
+/* Posts one read. */
 static op_status rx_post(op_win *w, rx_slot *s)
 {
     HANDLE ev = s->ov.hEvent;
@@ -225,10 +244,13 @@ static op_status rx_post(op_win *w, rx_slot *s)
     return from_io_error(e);
 }
 
+/* Any failure to post or collect a read ends the session: the reads complete
+ * in the order they were posted, and a slot posted out of turn would hand
+ * the cable's bytes over out of order. */
 static op_status rx_failed(op_win *w, op_status st)
 {
-    if (st == OP_ERR_NO_DEVICE) w->gone = 1;
-    return st;
+    atomic_store(&w->gone, 1);
+    return st == OP_ERR_NO_DEVICE ? st : OP_ERR_NO_DEVICE;
 }
 
 static op_status win_read(op_transport *t, uint8_t *buf, size_t cap,
@@ -243,7 +265,7 @@ static op_status win_read(op_transport *t, uint8_t *buf, size_t cap,
     if (t == NULL || t->impl == NULL || buf == NULL || got == NULL || cap == 0)
         return OP_ERR_PARAM;
     w = (op_win *)t->impl;
-    if (w->gone) return OP_ERR_NO_DEVICE;
+    if (atomic_load(&w->gone)) return OP_ERR_NO_DEVICE;
 
     if (!w->started) {
         /* This thread only moves the cable's bytes into the channel queues,
@@ -259,10 +281,6 @@ static op_status win_read(op_transport *t, uint8_t *buf, size_t cap,
     s = &w->rx[w->head];
     if (w->head_len == 0) {
         DWORD n = 0;
-        if (!s->posted) {
-            op_status st = rx_post(w, s);
-            if (st != OP_OK) return rx_failed(w, st);
-        }
         while (!HasOverlappedIoCompleted(&s->ov)
                && now_us() - atomic_load_explicit(&w->wr_issued_us, memory_order_relaxed)
                   < WIN_REPLY_WATCH_US)
@@ -278,12 +296,12 @@ static op_status win_read(op_transport *t, uint8_t *buf, size_t cap,
         if (!GetOverlappedResult(w->h, &s->ov, &n, FALSE)) {
             DWORD e = GetLastError();
             op_logf("read: error %lu", (unsigned long)e);
-            w->head = (w->head + 1) % w->nreads;    /* posted again when reached */
             return rx_failed(w, from_io_error(e));
         }
         if (n == 0) {
             /* A serial port's read waited out its timeout. */
-            (void)rx_post(w, s);
+            op_status st = rx_post(w, s);
+            if (st != OP_OK) return rx_failed(w, st);
             w->head = (w->head + 1) % w->nreads;
             return OP_ERR_TIMEOUT;
         }
@@ -297,7 +315,7 @@ static op_status win_read(op_transport *t, uint8_t *buf, size_t cap,
     w->head_pos += take;
     if (w->head_pos == w->head_len) {
         w->head_len = 0;
-        (void)rx_post(w, s);
+        if (rx_post(w, s) != OP_OK) atomic_store(&w->gone, 1);   /* this read's bytes still go out */
         w->head = (w->head + 1) % w->nreads;
     }
     *got = take;
@@ -329,8 +347,8 @@ static void win_free(op_win *w)
         op_logf("win: at most %u of the %u posted reads were complete when the "
                 "reader came for the oldest", w->waiting_most, w->nreads);
     if (w->h != INVALID_HANDLE_VALUE) CloseHandle(w->h);
-    if (!idle) {
-        op_logf("close: a read never returned; its buffers are left allocated");
+    if (!idle || w->wr_stuck) {
+        op_logf("close: an I/O never returned; its buffers are left allocated");
         return;
     }
     for (i = 0; w->rx != NULL && i < w->nreads; i++)

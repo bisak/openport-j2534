@@ -1,18 +1,20 @@
 ; Exports of the 64-bit Windows DLL. SPDX-License-Identifier: GPL-3.0-or-later
+; Ordinals as Tactrix's op20pt32.dll numbers them (alphabetical, 1-14),
+; for an application that imports by ordinal.
 EXPORTS
-    PassThruOpen
-    PassThruClose
-    PassThruConnect
-    PassThruDisconnect
-    PassThruReadMsgs
-    PassThruWriteMsgs
-    PassThruStartPeriodicMsg
-    PassThruStopPeriodicMsg
-    PassThruStartMsgFilter
-    PassThruStopMsgFilter
-    PassThruSetProgrammingVoltage
-    PassThruReadVersion
-    PassThruGetLastError
-    PassThruIoctl
-    DllRegisterServer PRIVATE
-    DllUnregisterServer PRIVATE
+    PassThruClose @1
+    PassThruConnect @2
+    PassThruDisconnect @3
+    PassThruGetLastError @4
+    PassThruIoctl @5
+    PassThruOpen @6
+    PassThruReadMsgs @7
+    PassThruReadVersion @8
+    PassThruSetProgrammingVoltage @9
+    PassThruStartMsgFilter @10
+    PassThruStartPeriodicMsg @11
+    PassThruStopMsgFilter @12
+    PassThruStopPeriodicMsg @13
+    PassThruWriteMsgs @14
+    DllRegisterServer @15 PRIVATE
+    DllUnregisterServer @16 PRIVATE

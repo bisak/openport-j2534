@@ -641,7 +641,9 @@ static void sc_thread_writes(void)
         while (tw_seen < tw_next && now_us() < end) tw_take(200);
         snprintf(d, sizeof d, "\"threads\":%d,\"frames\":%lu,\"echoed\":%lu,\"out_of_order\":%lu,\"failed_writes\":%lu",
                  i, tw_next, tw_seen, tw_disorder, tw_bad_writes);
-        record(sc, "thread_writes", tw_seen == tw_next && !tw_disorder && !tw_bad_writes ? STATUS_NOERROR : ERR_FAILED, t0, d);
+        record(sc, "thread_writes", i == bench_cycles && tw_seen == tw_next && !tw_disorder && !tw_bad_writes
+                                    ? STATUS_NOERROR : ERR_FAILED, t0, d);
+        if (i < bench_cycles) fprintf(stderr, "thread_writes: thread %d could not be started\n", i + 1);
         fprintf(stderr, "thread_writes: %d threads, %lu frames written, %lu echoed, %lu out of order, %lu writes failed\n",
                 i, tw_next, tw_seen, tw_disorder, tw_bad_writes);
         STEP(sc, "PassThruDisconnect", api.disconnect(tw_ch), NULL);

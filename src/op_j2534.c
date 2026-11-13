@@ -636,9 +636,8 @@ long J2534_API PassThruWriteMsgs(J_U32 ChannelID, const PASSTHRU_MSG *pMsg,
 
             if (Timeout == 0) {
                 /* J2534: queue the message and return at once. The transmit
-                 * is numbered like any other, so its reply is recognised and
-                 * dropped whenever it arrives instead of being read as the
-                 * answer to the next command. */
+                 * goes out unnumbered (op_device_send_nowait), so the cable
+                 * sends no reply to it. */
                 rc = write_one(d, ChannelID, &pMsg[sent], 0);
                 if (rc != STATUS_NOERROR) {
                     *pNumMsgs = sent;

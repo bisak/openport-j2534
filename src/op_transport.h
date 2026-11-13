@@ -49,7 +49,8 @@ struct op_transport {
  * hold a long payload back while it works, waiting for an ISO 15765 flow
  * control for as long as the budget the command itself gives it, so a write
  * that has started is carried on this long past the caller's timeout. Only a
- * write that has sent nothing gives up at the timeout. Measured 2026-11-12: a
+ * write that has sent nothing gives up at the timeout; on Windows, where a
+ * pending write's progress cannot be seen, every write gets the extra time. Measured 2026-11-12: a
  * 4099-byte ISO 15765 transmit with no ECU answering, cut at 100 ms, made the
  * next command time out. */
 #define OP_WRITE_GRACE_MS 2000u

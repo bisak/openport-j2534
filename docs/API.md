@@ -16,7 +16,8 @@ this page says so.
   first frame.
 - **Integers are `unsigned long`**, 8 bytes on 64-bit macOS and Linux and 4
   bytes on Windows. Declare them that way in any binding. On Windows the
-  functions are `__stdcall`, exported under their plain names.
+  functions are `__stdcall`, exported under their plain names and with the
+  ordinals Tactrix's DLL gives them (alphabetical, 1 to 14).
 - **Nothing blocks forever.** Every call has a time limit. When one fails,
   `PassThruGetLastError` gives the reason.
 - **Periodic messages run in the cable.** If your process dies, a periodic

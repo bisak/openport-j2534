@@ -236,6 +236,7 @@ static op_status usb_write(op_transport *t, const uint8_t *buf, size_t len,
 {
     op_usb *u;
     size_t sent = 0;
+    unsigned long long deadline;
 
     if (t == NULL || t->impl == NULL || (buf == NULL && len > 0))
         return OP_ERR_PARAM;
@@ -244,17 +245,24 @@ static op_status usb_write(op_transport *t, const uint8_t *buf, size_t len,
     if (timeout_ms == 0) timeout_ms = OP_MIN_TIMEOUT_MS;
 
     op_log_bytes("TX", buf, len);
+    deadline = op_mono_ms() + timeout_ms;
 
     /* Bulk writes can be short. Keep going until the whole command is on the
      * wire or the transfer genuinely fails — a half-written command line would
      * desynchronise the device's parser. */
     while (sent < len) {
         int moved = 0;
-        /* Part of the command is out: the rest must follow (OP_WRITE_GRACE_MS). */
-        int r = libusb_bulk_transfer(u->handle, u->ep_out,
-                                     (unsigned char *)(uintptr_t)(buf + sent),
-                                     (int)(len - sent), &moved,
-                                     sent > 0 ? OP_WRITE_GRACE_MS : timeout_ms);
+        /* Once part of the command is out, the rest has OP_WRITE_GRACE_MS
+         * more, once. libusb reads a timeout of 0 as unlimited. */
+        unsigned left = op_ms_left(deadline + (sent > 0 ? OP_WRITE_GRACE_MS : 0u));
+        int r;
+        if (left == 0) {
+            op_logf("usb_write: the cable took %zu of %zu bytes", sent, len);
+            return OP_ERR_STALLED;
+        }
+        r = libusb_bulk_transfer(u->handle, u->ep_out,
+                                 (unsigned char *)(uintptr_t)(buf + sent),
+                                 (int)(len - sent), &moved, left);
         if (r != LIBUSB_SUCCESS) {
             op_logf("usb_write: %s after %zu/%zu bytes",
                     libusb_error_name(r), sent, len);

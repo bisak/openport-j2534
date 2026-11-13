@@ -1203,8 +1203,8 @@ static void sequence_numbers_are_matched(void)
     CHECK_EQ(v, 12480, "the numbered reply is taken, not the stale or the unnumbered one");
     CHECK_EQ(PassThruConnect(dev, ISO15765, 0, 500000, &ch), STATUS_NOERROR, "Connect");
 
-    /* Fire-and-forget: the transmit's failure reply must not become the
-     * answer to the disconnect that follows it. */
+    /* Fire-and-forget: the transmit goes out unnumbered and gets no reply,
+     * and the disconnect that follows gets its own. */
     memset(&m, 0, sizeof m);
     m.ProtocolID = ISO15765; m.DataSize = 6; m.Data[2] = 0x07; m.Data[3] = 0xE0; m.Data[4] = 0x3E;
     CHECK_EQ(PassThruWriteMsgs(ch, &m, &n, 0), STATUS_NOERROR, "WriteMsgs with Timeout 0 returns at once");
