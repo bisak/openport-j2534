@@ -1,0 +1,37 @@
+# Attaches the Windows DLLs to a published release, built as CI builds them.
+# Windows users have no compiler; macOS and Linux build from source.
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: release
+on:
+  release:
+    types: [published]
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - run: make CC=i686-w64-mingw32-gcc CFLAGS="-O2 -g -Werror"
+      - run: make CC=x86_64-w64-mingw32-gcc CFLAGS="-O2 -g -Werror"
+      - name: package
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          d="openport-j2534-$TAG-windows"
+          mkdir -p "$d/win32" "$d/win64"
+          cp build/win32/openport-j2534-32.dll build/win32/op_probe.exe "$d/win32/"
+          cp build/win64/openport-j2534-64.dll build/win64/op_probe.exe "$d/win64/"
+          i686-w64-mingw32-strip "$d"/win32/*
+          x86_64-w64-mingw32-strip "$d"/win64/*
+          cp LICENSE NOTICE "$d/"
+          sed 's/$/\r/' tools/release/README-windows.txt > "$d/README.txt"
+          (cd "$d" && sha256sum win32/* win64/* > SHA256SUMS.txt)
+          zip -r "$d.zip" "$d"
+      - name: upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" "openport-j2534-$TAG-windows.zip" --clobber

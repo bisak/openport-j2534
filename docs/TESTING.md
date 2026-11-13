@@ -156,64 +156,149 @@ become layer 3's fixtures.
 
 ## The Windows build
 
-Tested two ways: on Windows 10 in a virtual machine with the cable passed
-through, and under Wine, which runs the same DLL on the build machine and is
-what `make` can repeat.
+Tested four ways: on a Windows PC with the cable through Tactrix's driver, in
+CI on every push, in a virtual machine with each of the cable's two USB
+drivers, and under Wine.
 
-| Command | What it checks |
+| Command | Where | What it checks |
+|---|---|---|
+| `make CC=i686-w64-mingw32-gcc test` | Wine, or MSYS2 on Windows | The unit tests of layer 3, compiled for Windows (`x86_64-w64-mingw32-gcc` for 64-bit). Everything above the byte pipe is the code that runs elsewhere, but `unsigned long` is 4 bytes there. |
+| `OPENPORT_LIB=…\openport-j2534-64.dll python tests\sim\run_scenarios.py` | Windows | Layer 4 with the simulator behind a named pipe, which the DLL opens as it opens Tactrix's driver: a handle that is not a serial port, read with 256 overlapped reads. A 32-bit DLL needs a 32-bit Python. The scenarios that drive `tools/car` need a tty and are skipped. |
+| `python tests\windows\registry_check.py <dll>` | Windows, as administrator | `regsvr32`, the key read back from the registry view an application of the DLL's width reads, the DLL loaded from its `FunctionLibrary`, an open (or `ERR_DEVICE_NOT_CONNECTED` with no cable), and `regsvr32 /u` leaving the registry as it was. |
+| `make wine-sim` | macOS or Linux | `tests/windows/run_wine.sh` for both widths: the DLL under Wine and the native library run `j2534_trace.c`'s scenarios against the simulator, and every step's result and every command on the wire must be the same. Wine hands the DLL the pty as a COM port. |
+| `j2534_trace <dll> out.jsonl stream --load 3 --seconds 30 --capture cap.txt` | a cable on a bus that acknowledges | The cable sends three frames every 1 ms and reports each one as received; the counts are every frame the library delivered. Compare them with another logger on the same bus. |
+| `j2534_trace <dll> out.jsonl thread_writes --cycles 300` | a cable on a bus that acknowledges | 300 threads in turn each write 50 frames with a `Timeout` of 0 and exit at once; with `LOOPBACK` on, every frame must come back, in order. Windows cancels a thread's pending I/O when the thread exits. |
+
+CI (`.github/workflows/ci.yml`) runs the first three on a Windows machine for
+both widths, from DLLs built on Linux exactly as a release builds them.
+
+### On a Windows PC
+
+Run on 2026-11-12 on Windows 10 21H2 (x64, a physical machine), the cable
+(firmware 1.17.4877) through Tactrix's driver (`openport2.inf` 1.0.0.4227),
+wired to a bench CAN bus at 500 kbit/s with an ECU and a second, independent
+CAN logger on it. Tactrix's DLL (`op20pt32.dll` 1.02.0.4868) ran on the same
+machine and bus for comparison. The DLLs were built on Ubuntu 24.04, as CI
+builds them.
+
+| Run | Result |
 |---|---|
-| `make CC=i686-w64-mingw32-gcc test` | The unit tests of layer 3, compiled for Windows and run under Wine. Everything above the byte pipe is the same code as elsewhere, but `unsigned long` is 4 bytes there. This found a transmit timeout above 2^31 ms read as negative, and the sequence-number seed overflowing. |
-| `make wine-sim` | `tests/windows/run_wine.sh` for both widths: the DLL under Wine and the native library run `tools/ab-official/j2534_trace.c`'s scenarios against the simulator, and every step's result and every command on the wire must be the same. This runs `src/op_win.c`, which the unit tests replace with the mock. |
-| `tests/windows/run_wine.sh 32 --cable /dev/ttyACM0` | The same on a cable. Three things differ from run to run there and are reported as differences: the battery voltage, the periodic message ids (the cable keeps counting them while powered), and which frames a live ECU happened to broadcast during a raw CAN read. |
+| Unit tests, both widths | 655 checks, 0 failures |
+| Simulator over a named pipe, 64-bit | 57 passed, 0 failed, a 20,000-frame burst included |
+| Both DLLs against the simulator, `j2534_trace` default scenarios | 67 steps, the same as the native library's on macOS |
+| `registry_check.py`, 64-bit; `regsvr32` by hand, 32-bit | every check passes; each key only in its own view, with Tactrix's protocol entries; removed without a trace |
+| Against Tactrix's DLL, default scenarios and `sweep` (32-bit) | the same results in over 1,450 steps but for the return codes listed in [AB-OFFICIAL.md](AB-OFFICIAL.md#return-codes); the final DLL again in 1,368 steps (`sweep_connect` left out) |
+| 32-bit against 64-bit, default scenarios | the same results |
+| `thread_writes --cycles 300`, both widths and Tactrix's DLL | 15,000 of 15,000 frames sent, in order, no write failed |
+| ECU reads (`22` of four identifiers, one a multi-frame reply), 200 rounds | the same replies as Tactrix's DLL; a round trip of 3.99 ms against 3.98, 10.02 ms against 10.03 |
+| A second program opening the cable | `ERR_DEVICE_IN_USE`; the first program's session is undisturbed; a held cable gives Tactrix's DLL "no devices available" |
 
-`run_wine.sh` takes scenario names after `--`, as `make ab-official` does:
-`-- sweep`, `-- kline edge`, `-- bench --cycles 200`.
+Frames lost from the cable's own 3 × 1 ms load, about 3,100 frames a second
+with the ECU's, over 30 s: the second logger's count of the load frames on the
+bus, less the count each DLL delivered. "Frozen" suspends every thread of the
+reading process for 300 ms of every 500 ms, as paging does.
 
-### On Windows
+| Condition | Tactrix's DLL | one read waiting | this driver |
+|---|---|---|---|
+| idle | 0 | 0 | 0 |
+| every core busy at normal priority | 0 | 0 | 0 |
+| frozen 300 ms of every 500 | 2,538 | 2,517 | 0 |
+| every core busy above normal priority, the reading program starved | 19,945 | 9,516 | 12,841, reported to the program as an overflow |
+
+The final DLLs, 32-bit and 64-bit, lost no frame frozen; Tactrix's DLL lost
+2,516 in the same run. Held to one core, the final 32-bit DLL lost none frozen
+or with every core busy; Tactrix's DLL lost 2,534 frozen. A starved program cannot read, so the cable discards
+frames whatever the driver; how many varies from run to run. The cable's
+timestamps never ran backwards in about 650,000 frames read through 256
+waiting reads, so the driver completes them in order.
+
+Speed and CPU, the same work through both DLLs:
+
+| Work | Tactrix's DLL | this driver |
+|---|---|---|
+| 488 configuration commands (`sweep_config`): median, run, CPU | 0.79–0.93 ms; 1.19–1.31 s; 0.14–0.25 s | 0.85 ms; 1.04 s; 1.04 s |
+| The same, the program held to one core | 0.84 ms; 1.27 s; 0.16 s | 0.79 ms; 0.98 s; 0.97 s |
+| 800 ECU reads: run, CPU | 4.62 s; 0.19–0.22 s | 4.44 s; 0.13 s |
+| A transmit with a `Timeout` (`bench`), until `PassThruWriteMsgs` returns: median | 1.13 ms | 1.34 ms |
+| 5,000 frames as 100 writes of 50 with a `Timeout` of 0: time in `PassThruWriteMsgs` | 3.40 s | 3.45 s (5.07 s while those transmits were numbered) |
+
+The CPU on configuration commands is the reader watching for each reply for up
+to 1.5 ms (`src/op_win.c`); between commands it costs nothing.
+
+A transmit returns when the cable answers `aro`, with both DLLs: in the
+emulator, delaying that answer by 100 ms delays Tactrix's DLL by as much. Here
+the cable reports the frame sent 0.87 ms after the command and answers `aro`
+0.4 ms later. Neither the number of reads waiting (1 to 256) nor their size
+(256 bytes to 8 KB) changes that, and why the answer comes sooner to Tactrix's
+DLL is not known. An ECU's reply is read as soon as it arrives, so the round
+trips above are the same.
+
+What the session found:
+
+- A command cut off at the caller's timeout left the cable reading the next
+  command as the rest of it ([PROTOCOL.md](PROTOCOL.md#2-framing-v)). Commands
+  are now sent whole.
+- An application may call `PassThruWriteMsgs` with a `Timeout` of 0 from a
+  thread that then exits, and Windows cancels a thread's pending I/O when it
+  exits. A version that returned with the USB write still pending sent 7,349
+  of 15,000 frames from 300 such threads, out of order, and failed 150 writes
+  with `ERR_DEVICE_NOT_CONNECTED`. A write now returns only once the cable has
+  the whole command; all 15,000 arrive in order, as with Tactrix's DLL.
+- A transmit sent with a number makes the cable answer it, which costs about
+  0.4 ms before it takes the next command. Tactrix's DLL sends a `Timeout=0`
+  transmit unnumbered, and so does this driver now.
+- DLLs built on Ubuntu link `msvcrt.dll`, whose copy of the environment is made
+  when the DLL loads, so a variable the host program set afterwards (Python's
+  `os.environ`) went unseen. `OPENPORT_*` are now read from the process.
+- The cable can hang, through either DLL, when a channel is opened at
+  250 kbit/s on a live 500 kbit/s bus and closed again: once in six rounds
+  through this driver and once in three through Tactrix's DLL; see
+  [PROTOCOL.md](PROTOCOL.md#the-cable-hangs-after-a-wrong-rate-connect-v).
+  Only removing all its power, USB and the vehicle connector's, brings it back.
+- `pnputil /restart-device` waits while the cable is open, so a detach cannot
+  be made in software; the virtual machine's detach below stands.
+
+### The same changes on macOS
+
+Run on 2026-11-13 on macOS (Apple Silicon), the same cable and bus, the cable
+through its serial device, comparing release 0.4.2 with these changes:
+
+| Run | Result |
+|---|---|
+| `make check-all` | every hardware-free layer passes |
+| Default scenarios and `sweep_config sweep_filter sweep_tx` | the same results in 1,370 steps but one: the 4,099-byte ISO 15765 transmit returns `ERR_TIMEOUT`, as with Tactrix's DLL, where 0.4.2 returned `ERR_DEVICE_NOT_CONNECTED` |
+| ECU reads, 200 rounds | the same replies and round trips (3.8 ms, 9.9 ms) |
+| `thread_writes --cycles 300` | 15,000 of 15,000 frames, in order, through both; 10.1 s against 16.9 s, the transmits now unnumbered |
+| A transmit with a `Timeout` (`bench`): median | 1.29 ms against 1.33 ms |
+| Frames lost from the 3 × 1 ms load over 30 s, by the second logger, idle and frozen 300 ms of every 500 | none through either, and no timestamp ran backwards |
+
+UltiMaker Cura, left running, opened the cable's serial device the moment the
+cable was plugged in and kept it, so `PassThruOpen` returned `ERR_DEVICE_IN_USE`
+until Cura quit.
+
+### In a virtual machine
 
 Run on 2026-11-11 on Windows 10 Pro 22H2 (64-bit) in VirtualBox 7.0.16, the
-cable (firmware 1.17.4877) passed through and wired to the bench ECU. The same
-programs were run with each of the two USB drivers the cable can have, 32-bit
-and 64-bit alike:
+cable passed through and wired to a bench ECU, with the first version of the
+Windows transport (one read waiting). The same programs ran with each of the
+two USB drivers the cable can have, 32-bit and 64-bit alike:
 
 | Run | Tactrix's driver | Windows' `usbser.sys` |
 |---|---|---|
 | `op_probe.exe` | the device interface | "USB Serial Device (COM3)" |
-| `run_tests.exe` (needs no cable) | 654 checks, 0 failures | the same |
-| `op_smoke.exe` | all checks pass | all checks pass |
-| `op_iso15765.exe` on the bench ECU | single-frame and multi-frame replies, raw CAN; 0 failures | the same |
+| `op_smoke.exe`, `op_iso15765.exe` on the bench ECU | all checks pass | all checks pass |
 | `j2534_trace.exe`, default scenarios | 67 steps | 67 steps, every return code as with Tactrix's driver |
 | `j2534_trace.exe bench --cycles 100` | 100 of 100 answered; a write takes 1.3 ms (median) | 100 of 100; 1.3 ms |
-| Cable detached from the machine mid-session | the waiting `PassThruReadMsgs` returns `ERR_DEVICE_NOT_CONNECTED` at once, and so does every later call; a new `PassThruOpen` reports no cable | the same, the waiting read after 0.27 s |
-| A second program opening the cable | `ERR_DEVICE_IN_USE`; the first program's session is not disturbed | not run |
-| `regsvr32`, `regsvr32 /u` | each DLL's key appears in, and leaves, its own registry view | |
+| Cable detached mid-session | the waiting `PassThruReadMsgs` returns `ERR_DEVICE_NOT_CONNECTED` at once, and so does every later call; a new `PassThruOpen` reports no cable | the same, the waiting read after 0.27 s |
 
 Removing Tactrix's driver package (`pnputil /delete-driver … /uninstall`) was
 enough for Windows to give the cable `usbser.sys` and a COM port, which the
-library found by USB id.
+library found by USB id. Windows Defender ends a test program started by typing
+its command into the Run dialog (`Behavior:Win32/SuspClickFix`); start them
+from a console.
 
-The first run found one fault: a log or recording file was only written when
-the program ended, because Windows' C library has no line buffering. Both are
-now flushed after every line.
-
-Two things from that session to know about:
-
-- The cable stopped answering once, 11 seconds into a session through
-  Tactrix's driver: writes were accepted and nothing came back, in that
-  program, in the next, and from the Linux host after the cable was handed
-  back. A USB port reset did not clear it. The cause is not established; the
-  cable had been attached to and detached from the virtual machine several
-  times, and test programs had been killed mid-session (next item). After a
-  replug it answered again, and a further detach and reattach did not bring
-  the fault back.
-- Windows Defender ends a test program that is started by typing its command
-  into the Run dialog (`Behavior:Win32/SuspClickFix`), about a second in and
-  with exit code 0. Start them from a console or by double-clicking a script.
-
-Still open on Windows:
-
-- a J2534 application loading the registered DLL;
-- any Windows version other than 10.
+Still open on Windows: the COM-port path since the transport changed, an
+application other than the test programs, and any Windows version but 10.
 
 ### Under Wine
 
@@ -234,6 +319,10 @@ a serial port, so this exercises `src/op_win.c` but neither Windows driver.
 
 Wine 9.0 does not implement the serial read timeouts the library sets on
 Windows, so under Wine it sets another combination (`src/op_win.c`).
+
+The final DLLs ran again on 2026-11-13, under box64 and Wine on macOS against
+the simulator as a COM port: 67 steps each width, the same results and the same
+commands on the wire as the native library.
 
 ## The bug every layer missed
 

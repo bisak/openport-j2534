@@ -638,7 +638,10 @@ static op_status cmd_exchange(op_device *d, const char *line, size_t line_len,
 
     memcpy(numbered, line, line_len);
     numbered[line_len] = '\0';
-    if (op_cmd_is_numbered(numbered)) {
+    /* A command nobody waits for goes out unnumbered, as Tactrix's DLL sends
+     * it: the cable then sends no reply, and takes the next command 0.4 ms
+     * sooner (a 50-frame write, 2026-11-13). */
+    if (wait && op_cmd_is_numbered(numbered)) {
         size_t n;
         seq = d->seq_next++;
         if (d->seq_next < 256) d->seq_next = 256;   /* a key byte never looks like one */

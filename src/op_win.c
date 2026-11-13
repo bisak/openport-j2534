@@ -17,51 +17,86 @@
  * OPENPORT_DEVICE names a COM port ("COM7") or a device path instead; a
  * simulator behind a COM port is opened the same way.
  *
- * One read is kept posted across calls: a read that outlives its caller's
- * timeout stays pending and the next call collects it, so no data is lost to
- * a cancelled read and the pipe is never left without a reader for longer
- * than the caller takes to come back.
+ * Receiving: the cable sends each record as its own short packet and holds
+ * about 1.1 KB of them, some 17 ms of a dense stream, for a host that is not
+ * asking; past that it discards new CAN frames and marks nothing (measured
+ * 2026-10-23, PROTOCOL.md section 1). Tactrix's driver hands each ReadFile to
+ * the bulk pipe, and Tactrix's DLL keeps one posted. Here WIN_RX_READS stay
+ * posted: win_read collects the oldest and posts it again at once, so the
+ * driver holds the rest while the process is busy or frozen. win_read runs
+ * only on the device's reader thread (op_device.c), which lives as long as the
+ * handle, so its reads are never cancelled by a thread that exits, and there
+ * is no second thread to wake. A COM port gets one read: usbser.sys reads the
+ * cable itself and buffers, as the serial driver does on macOS.
+ *
+ * Sending: win_write returns once the whole command is with the driver,
+ * carrying it on past the caller's timeout as long as OP_WRITE_GRACE_MS
+ * allows, so it is never left half sent. It does not return with the write
+ * still pending: Windows cancels a thread's I/O when the thread exits, and
+ * an application may write from a thread that exits at once (a test of 300
+ * such threads lost half their frames that way, 2026-11-13).
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include "op_printf.h"
 #include "op_transport.h"
 #include "op_log.h"
+#include "op_env.h"
 
 #include <windows.h>
 #include <initguid.h>
 #include <setupapi.h>
 #include <mmsystem.h>
 
+#include "op_win_ids.h"
+
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define OP_HWID            "VID_0403&PID_CC4D"
-/* With a microSD card inserted the cable enumerates as storage; in its
- * bootloader it is cc4b (PROTOCOL.md section 12). Neither can be driven. */
-#define OP_HWID_STORAGE    "VID_0403&PID_CC4C"
-#define OP_HWID_BOOTLOADER "VID_0403&PID_CC4B"
+/* After a command goes out, the reader watches for its reply this long
+ * before it sleeps. The cable answers a command of its own in about 1 ms;
+ * a thread woken from sleep on this PC costs about 0.2 ms more, and the
+ * watching keeps a core awake so every wake in the exchange is fast. A
+ * configuration command then takes 0.87 ms, as with Tactrix's DLL, where it
+ * took 1.15 ms (measured 2026-11-12). It costs at most this much CPU a
+ * command, and nothing while no command waits. */
+#define WIN_REPLY_WATCH_US 1500u
 
-/* The device interface Tactrix's driver registers for the cable. */
-DEFINE_GUID(OP_TACTRIX_IFACE, 0x6d1781b7, 0xc987, 0x4f6c,
-            0x8d, 0x4f, 0x1e, 0xfc, 0x09, 0x8b, 0xea, 0x67);
-/* GUID_DEVINTERFACE_COMPORT, spelled out so no DDK header is needed. */
-DEFINE_GUID(OP_COMPORT_IFACE, 0x86e0d1e0, 0x8089, 0x11d0,
-            0x9c, 0xe4, 0x08, 0x00, 0x3e, 0x30, 0x1f, 0x73);
+/* 256 packets is at least 60 ms of a dense stream, on top of the cable's own
+ * 17 ms. A read's buffer is a multiple of the 64-byte packet, so a bulk read
+ * ends on a short packet and never overflows. */
+#define WIN_RX_READS 256u
+#define WIN_RX_LEN   256u
 
-/* A multiple of the 64-byte packet, so a bulk read ends on a short packet
- * and never overflows. */
-#define WIN_RX_LEN 4096u
+typedef struct {
+    OVERLAPPED ov;
+    int        posted;          /* with the driver, not yet collected */
+    uint8_t    buf[WIN_RX_LEN];
+} rx_slot;
 
 typedef struct {
     HANDLE     h;
-    int        is_comm;       /* a serial port: comm timeouts apply */
-    OVERLAPPED rd, wr;
-    int        rd_pending;    /* a ReadFile into rbuf has not completed */
-    uint8_t    rbuf[WIN_RX_LEN];
-    size_t     rpos, rlen;    /* bytes of rbuf not yet handed out */
+    int        is_comm;         /* a serial port: comm timeouts apply */
+
+    OVERLAPPED wr;
+    /* now_us() when the last command went out: written by the caller,
+     * read by the reader thread. */
+    atomic_ullong wr_issued_us;
+
+    /* The reader thread's alone. Reads complete in the order they were
+     * posted, slot 0 first and round, so head is always the oldest. */
+    rx_slot   *rx;
+    unsigned   nreads, head;
+    size_t     head_len, head_pos;  /* head's bytes in hand, and handed out */
+    int        started;
+    int        gone;            /* a read found the cable gone */
+    /* The most reads found complete when the reader came for the oldest: all
+     * of them means the pipe went unpolled and the cable may have discarded
+     * frames. Close logs it. */
+    unsigned   waiting_most;
 } op_win;
 
 static _Thread_local char g_detail[320];
@@ -103,126 +138,212 @@ static op_status from_io_error(DWORD e)
     }
 }
 
+/* Microseconds on the performance counter: GetTickCount64 moves in steps
+ * of the 15.6 ms system tick, which timeBeginPeriod does not shorten. */
+static ULONGLONG now_us(void)
+{
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (ULONGLONG)c.QuadPart / (ULONGLONG)f.QuadPart * 1000000u
+         + (ULONGLONG)c.QuadPart % (ULONGLONG)f.QuadPart * 1000000u / (ULONGLONG)f.QuadPart;
+}
+
+static ULONGLONG now_ms(void)
+{
+    return now_us() / 1000u;
+}
+
 static op_status win_write(op_transport *t, const uint8_t *buf, size_t len,
                            unsigned timeout_ms)
 {
     op_win *w;
-    size_t sent = 0;
+    size_t done = 0;
+    ULONGLONG deadline;
 
-    if (t == NULL || t->impl == NULL || (buf == NULL && len > 0))
+    if (t == NULL || t->impl == NULL || (buf == NULL && len > 0) || len > MAXDWORD)
         return OP_ERR_PARAM;
     w = (op_win *)t->impl;
-    if (timeout_ms == 0) timeout_ms = 1;
+    if (len == 0) return OP_OK;
 
     op_log_bytes("TX", buf, len);
-
+    deadline = now_ms() + (timeout_ms ? timeout_ms : 1u) + OP_WRITE_GRACE_MS;
+    atomic_store_explicit(&w->wr_issued_us, now_us(), memory_order_relaxed);
     /* One WriteFile carries the whole command: the cable rejects a payload
-     * that arrives late (PROTOCOL.md section 1). The loop only runs again
-     * if the driver takes less than it was given. */
-    while (sent < len) {
+     * that arrives late (PROTOCOL.md section 1). */
+    while (done < len) {
+        HANDLE ev = w->wr.hEvent;
+        ULONGLONG now;
         DWORD n = 0, e;
 
-        ResetEvent(w->wr.hEvent);
-        if (!WriteFile(w->h, buf + sent, (DWORD)(len - sent), &n, &w->wr)) {
+        memset(&w->wr, 0, sizeof w->wr);
+        w->wr.hEvent = ev;
+        ResetEvent(ev);
+        if (!WriteFile(w->h, buf + done, (DWORD)(len - done), NULL, &w->wr)
+            && (e = GetLastError()) != ERROR_IO_PENDING) {
+            op_logf("write: error %lu", (unsigned long)e);
+            return from_io_error(e);
+        }
+        now = now_ms();
+        if (WaitForSingleObject(ev, now < deadline ? (DWORD)(deadline - now) : 0)
+            != WAIT_OBJECT_0) {
+            /* Cancelled, then reaped: the write may have finished first. */
+            CancelIoEx(w->h, &w->wr);
+            if (GetOverlappedResult(w->h, &w->wr, &n, TRUE) && done + n >= len) return OP_OK;
+            op_logf("write: the cable took %zu of %zu bytes before the time ran out",
+                    done + (size_t)w->wr.InternalHigh, len);
+            return OP_ERR_STALLED;
+        }
+        if (!GetOverlappedResult(w->h, &w->wr, &n, FALSE)) {
             e = GetLastError();
-            if (e != ERROR_IO_PENDING) {
-                op_logf("write: error %lu", (unsigned long)e);
-                return from_io_error(e);
-            }
-            if (WaitForSingleObject(w->wr.hEvent, timeout_ms) != WAIT_OBJECT_0) {
-                /* Cancelled, then reaped: the OVERLAPPED must be idle before
-                 * it is used again, and the write may have finished first. */
-                CancelIoEx(w->h, &w->wr);
-                if (!GetOverlappedResult(w->h, &w->wr, &n, TRUE)) n = 0;
-                sent += n;
-                if (sent >= len) break;
-                return sent == 0 ? OP_ERR_STALLED : OP_ERR_TIMEOUT;
-            }
-            if (!GetOverlappedResult(w->h, &w->wr, &n, FALSE)) {
-                e = GetLastError();
-                op_logf("write: error %lu", (unsigned long)e);
-                return from_io_error(e);
-            }
+            op_logf("write: error %lu", (unsigned long)e);
+            return from_io_error(e);
         }
         if (n == 0) return OP_ERR_IO;
-        sent += n;
+        done += n;
     }
     return OP_OK;
+}
+
+/* Posts one read; a slot that cannot be posted is tried again when the
+ * reader reaches it. */
+static op_status rx_post(op_win *w, rx_slot *s)
+{
+    HANDLE ev = s->ov.hEvent;
+    DWORD e;
+
+    memset(&s->ov, 0, sizeof s->ov);
+    s->ov.hEvent = ev;
+    ResetEvent(ev);
+    /* Done at once or pending, the result is collected the same way. */
+    if (ReadFile(w->h, s->buf, WIN_RX_LEN, NULL, &s->ov)
+        || (e = GetLastError()) == ERROR_IO_PENDING) {
+        s->posted = 1;
+        return OP_OK;
+    }
+    op_logf("read: error %lu", (unsigned long)e);
+    return from_io_error(e);
+}
+
+static op_status rx_failed(op_win *w, op_status st)
+{
+    if (st == OP_ERR_NO_DEVICE) w->gone = 1;
+    return st;
 }
 
 static op_status win_read(op_transport *t, uint8_t *buf, size_t cap,
                           size_t *got, unsigned timeout_ms)
 {
     op_win *w;
-    DWORD n = 0, e;
+    rx_slot *s;
     size_t take;
+    unsigned i;
 
     if (got != NULL) *got = 0;
     if (t == NULL || t->impl == NULL || buf == NULL || got == NULL || cap == 0)
         return OP_ERR_PARAM;
     w = (op_win *)t->impl;
+    if (w->gone) return OP_ERR_NO_DEVICE;
 
-    if (w->rpos == w->rlen) {
-        int waited = 0;
-
-        if (!w->rd_pending) {
-            ResetEvent(w->rd.hEvent);
-            if (ReadFile(w->h, w->rbuf, WIN_RX_LEN, &n, &w->rd)) {
-                /* completed at once; n is set */
-            } else if ((e = GetLastError()) == ERROR_IO_PENDING) {
-                w->rd_pending = 1;
-            } else {
-                op_logf("read: error %lu", (unsigned long)e);
-                return from_io_error(e);
-            }
+    if (!w->started) {
+        /* This thread only moves the cable's bytes into the channel queues,
+         * and must run whenever they arrive. */
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        w->started = 1;
+        for (i = 0; i < w->nreads; i++) {
+            op_status st = rx_post(w, &w->rx[i]);
+            if (st != OP_OK) return rx_failed(w, st);
         }
-        if (w->rd_pending) {
-            if (WaitForSingleObject(w->rd.hEvent, timeout_ms) != WAIT_OBJECT_0)
-                return OP_ERR_TIMEOUT;          /* the read stays posted */
-            w->rd_pending = 0;
-            waited = 1;
-            if (!GetOverlappedResult(w->h, &w->rd, &n, FALSE)) {
-                e = GetLastError();
-                op_logf("read: error %lu", (unsigned long)e);
-                return from_io_error(e);
-            }
-        }
-        if (n == 0) {
-            /* A serial port's read timed out with nothing, or the pipe sent
-             * a zero-length packet. Neither is data. A driver that answers
-             * every read with nothing at once must not spin the caller. */
-            if (!waited) Sleep(timeout_ms < 10 ? timeout_ms : 10);
-            return OP_ERR_TIMEOUT;
-        }
-        w->rpos = 0;
-        w->rlen = n;
     }
 
-    take = w->rlen - w->rpos;
+    s = &w->rx[w->head];
+    if (w->head_len == 0) {
+        DWORD n = 0;
+        if (!s->posted) {
+            op_status st = rx_post(w, s);
+            if (st != OP_OK) return rx_failed(w, st);
+        }
+        while (!HasOverlappedIoCompleted(&s->ov)
+               && now_us() - atomic_load_explicit(&w->wr_issued_us, memory_order_relaxed)
+                  < WIN_REPLY_WATCH_US)
+            SwitchToThread();               /* lets anything else ready run */
+        if (WaitForSingleObject(s->ov.hEvent, timeout_ms) != WAIT_OBJECT_0)
+            return OP_ERR_TIMEOUT;                  /* it stays posted */
+        for (i = 1; i < w->nreads; i++) {
+            const rx_slot *later = &w->rx[(w->head + i) % w->nreads];
+            if (!later->posted || !HasOverlappedIoCompleted(&later->ov)) break;
+        }
+        if (i > w->waiting_most) w->waiting_most = i;
+        s->posted = 0;
+        if (!GetOverlappedResult(w->h, &s->ov, &n, FALSE)) {
+            DWORD e = GetLastError();
+            op_logf("read: error %lu", (unsigned long)e);
+            w->head = (w->head + 1) % w->nreads;    /* posted again when reached */
+            return rx_failed(w, from_io_error(e));
+        }
+        if (n == 0) {
+            /* A serial port's read waited out its timeout. */
+            (void)rx_post(w, s);
+            w->head = (w->head + 1) % w->nreads;
+            return OP_ERR_TIMEOUT;
+        }
+        w->head_len = n;
+        w->head_pos = 0;
+    }
+
+    take = w->head_len - w->head_pos;
     if (take > cap) take = cap;
-    memcpy(buf, w->rbuf + w->rpos, take);
-    w->rpos += take;
+    memcpy(buf, s->buf + w->head_pos, take);
+    w->head_pos += take;
+    if (w->head_pos == w->head_len) {
+        w->head_len = 0;
+        (void)rx_post(w, s);
+        w->head = (w->head + 1) % w->nreads;
+    }
     *got = take;
     op_log_bytes("RX", buf, take);
     return OP_OK;
 }
 
+/* Frees what open_path allocated, once nothing the driver holds points into
+ * it. The reader thread has exited by now, which cancelled its reads. */
+static void win_free(op_win *w)
+{
+    unsigned i;
+    int idle = 1;
+    ULONGLONG until;
+
+    if (w->h != INVALID_HANDLE_VALUE) CancelIoEx(w->h, NULL);
+    until = now_ms() + 1000;                /* for all of them together */
+    for (i = 0; w->rx != NULL && i < w->nreads; i++) {
+        ULONGLONG now = now_ms();
+        DWORD n;
+        if (!w->rx[i].posted) continue;
+        if (WaitForSingleObject(w->rx[i].ov.hEvent, now < until ? (DWORD)(until - now) : 0)
+            == WAIT_OBJECT_0)
+            (void)GetOverlappedResult(w->h, &w->rx[i].ov, &n, FALSE);
+        else
+            idle = 0;
+    }
+    if (w->started && !w->is_comm)
+        op_logf("win: at most %u of the %u posted reads were complete when the "
+                "reader came for the oldest", w->waiting_most, w->nreads);
+    if (w->h != INVALID_HANDLE_VALUE) CloseHandle(w->h);
+    if (!idle) {
+        op_logf("close: a read never returned; its buffers are left allocated");
+        return;
+    }
+    for (i = 0; w->rx != NULL && i < w->nreads; i++)
+        if (w->rx[i].ov.hEvent != NULL) CloseHandle(w->rx[i].ov.hEvent);
+    if (w->wr.hEvent != NULL) CloseHandle(w->wr.hEvent);
+    free(w->rx);
+    free(w);
+}
+
 static void win_close(op_transport *t)
 {
-    op_win *w;
-    DWORD n;
-
     if (t == NULL || t->impl == NULL) return;
-    w = (op_win *)t->impl;
-    if (w->h != INVALID_HANDLE_VALUE) {
-        CancelIoEx(w->h, NULL);
-        /* The posted read writes into rbuf until it has been reaped. */
-        if (w->rd_pending) (void)GetOverlappedResult(w->h, &w->rd, &n, TRUE);
-        CloseHandle(w->h);
-    }
-    if (w->rd.hEvent != NULL) CloseHandle(w->rd.hEvent);
-    if (w->wr.hEvent != NULL) CloseHandle(w->wr.hEvent);
-    free(w);
+    win_free((op_win *)t->impl);
     timeEndPeriod(1);
     t->impl = NULL;
     t->ops  = NULL;
@@ -297,6 +418,20 @@ static int comm_setup(HANDLE h)
     return 1;
 }
 
+static int rx_alloc(op_win *w)
+{
+    unsigned i;
+
+    w->wr.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+    w->rx = (rx_slot *)calloc(w->nreads, sizeof *w->rx);
+    if (w->wr.hEvent == NULL || w->rx == NULL) return 0;
+    for (i = 0; i < w->nreads; i++) {
+        w->rx[i].ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+        if (w->rx[i].ov.hEvent == NULL) return 0;
+    }
+    return 1;
+}
+
 static op_status open_path(op_transport *out, const char *path, const char *what)
 {
     op_win *w;
@@ -326,20 +461,19 @@ static op_status open_path(op_transport *out, const char *path, const char *what
     }
 
     w = (op_win *)calloc(1, sizeof *w);
-    if (w != NULL) {
-        w->h = h;
-        w->rd.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
-        w->wr.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
-    }
-    if (w == NULL || w->rd.hEvent == NULL || w->wr.hEvent == NULL) {
-        if (w != NULL && w->rd.hEvent != NULL) CloseHandle(w->rd.hEvent);
-        if (w != NULL && w->wr.hEvent != NULL) CloseHandle(w->wr.hEvent);
-        free(w);
+    if (w == NULL) {
         CloseHandle(h);
         set_detail("out of memory");
         return OP_ERR_IO;
     }
+    w->h = h;
     w->is_comm = comm_setup(h);
+    w->nreads = w->is_comm ? 1u : WIN_RX_READS;
+    if (!rx_alloc(w)) {
+        win_free(w);
+        set_detail("out of memory");
+        return OP_ERR_IO;
+    }
 
     /* The system timer ticks every 15.6 ms unless asked otherwise, and every
      * timed wait in the library would be rounded up to it. */
@@ -347,13 +481,14 @@ static op_status open_path(op_transport *out, const char *path, const char *what
 
     out->ops  = &g_win_ops;
     out->impl = w;
-    op_logf("open: %s (%s)", path, w->is_comm ? "serial port" : "device interface");
+    op_logf("open: %s (%s, %u reads posted)", path,
+            w->is_comm ? "serial port" : "device interface", w->nreads);
     return OP_OK;
 }
 
 op_status op_serial_open(op_transport *out, const char *path)
 {
-    char full[300];
+    char full[610];
 
     if (out == NULL || path == NULL) return OP_ERR_PARAM;
     out->ops = NULL;
@@ -366,16 +501,6 @@ op_status op_serial_open(op_transport *out, const char *path)
     return open_path(out, path, path);
 }
 
-/* Case-insensitive search of a REG_MULTI_SZ (or a plain string) for id. */
-static int multi_sz_has(const char *multi, size_t len, const char *id)
-{
-    size_t n = strlen(id), i;
-    if (len < n) return 0;
-    for (i = 0; i + n <= len; i++)
-        if (_strnicmp(multi + i, id, n) == 0) return 1;
-    return 0;
-}
-
 static int hwid_has(HDEVINFO set, SP_DEVINFO_DATA *dev, const char *id)
 {
     char ids[1024];
@@ -383,7 +508,7 @@ static int hwid_has(HDEVINFO set, SP_DEVINFO_DATA *dev, const char *id)
     if (!SetupDiGetDeviceRegistryPropertyA(set, dev, SPDRP_HARDWAREID, &type,
                                            (BYTE *)ids, sizeof ids, &len))
         return 0;
-    return multi_sz_has(ids, len < sizeof ids ? len : sizeof ids, id);
+    return op_win_has_id(ids, len < sizeof ids ? len : sizeof ids, id);
 }
 
 /* The path of the first present interface of class `iface` that belongs to
@@ -411,7 +536,7 @@ static int find_interface(const GUID *iface, char *path, size_t cap)
         dev.cbSize = sizeof dev;
         if (!SetupDiGetDeviceInterfaceDetailA(set, &ifd, &detail.d, sizeof detail, NULL, &dev))
             continue;
-        if (multi_sz_has(detail.d.DevicePath, strlen(detail.d.DevicePath), OP_HWID)
+        if (op_win_has_id(detail.d.DevicePath, strlen(detail.d.DevicePath), OP_HWID)
             || hwid_has(set, &dev, OP_HWID)) {
             snprintf(path, cap, "%s", detail.d.DevicePath);
             found = 1;
@@ -460,7 +585,8 @@ op_status op_serial_find(uint16_t vid, uint16_t pid, char *path, size_t cap)
  */
 op_status op_transport_open(op_transport *out)
 {
-    const char *dev = getenv("OPENPORT_DEVICE");
+    char dev_buf[600];
+    const char *dev = op_getenv("OPENPORT_DEVICE", dev_buf, sizeof dev_buf);
     char path[600], service[64];
 
     if (out == NULL) return OP_ERR_PARAM;

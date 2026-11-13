@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include "op_log.h"
+#include "op_env.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -20,11 +21,12 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static void log_init_locked(void)
 {
     const char *dest, *hex;
+    char dest_buf[1024], hex_buf[8];
 
     if (g_init) return;
     g_init = 1;
 
-    dest = getenv("OPENPORT_LOG");
+    dest = op_getenv("OPENPORT_LOG", dest_buf, sizeof dest_buf);
     if (dest == NULL || dest[0] == '\0') return;
 
     if (strcmp(dest, "-") == 0 || strcmp(dest, "stderr") == 0) {
@@ -38,7 +40,7 @@ static void log_init_locked(void)
         }
     }
 
-    hex = getenv("OPENPORT_LOG_HEX");
+    hex = op_getenv("OPENPORT_LOG_HEX", hex_buf, sizeof hex_buf);
     g_hex = (hex != NULL && hex[0] == '1');
 }
 

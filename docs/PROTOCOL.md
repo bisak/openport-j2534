@@ -78,16 +78,17 @@ is why every command starts with `at`. There are two ways in:
 On Windows the same two ways exist under other names **[V]**. Tactrix's USB
 driver offers the bulk pipes as a device interface of class
 `{6d1781b7-c987-4f6c-8d4f-1efc098bea67}`, the handle `op20pt32.dll` opens and
-reads with overlapped `ReadFile` (its registry shape is
+reads with one overlapped `ReadFile` (its registry shape is
 `tools/ab-official/iface.reg`). Without that driver, Windows 10 binds its own
 CDC-ACM driver, `usbser.sys`, and the cable is "USB Serial Device (COMn)".
-`src/op_win.c` opens either, the interface first, with one overlapped read
-kept posted. Measured on 2026-11-11 on Windows 10 22H2 in a virtual machine
-with the cable passed through, against the bench ECU of §10: both drivers
-carried the same sessions with the same results, a write taking 1.3 ms through
-either. A cable detached mid-session fails the pending read with error 995
-(`ERROR_OPERATION_ABORTED`) through both, and Tactrix's driver refuses a
-second open with error 5 ([TESTING.md](TESTING.md#the-windows-build)).
+`src/op_win.c` opens either, the interface first. On the interface it keeps
+256 reads waiting, so the driver holds what arrives while the process is busy
+or frozen: frozen 300 ms of every 500 ms at about 3,100 frames a second, it
+lost none where one read waiting lost about 2,500 in 30 s, through this driver
+and through Tactrix's DLL alike (2026-11-12,
+[TESTING.md](TESTING.md#on-a-windows-pc)). A cable detached mid-session fails
+the waiting read with error 995 (`ERROR_OPERATION_ABORTED`) through both
+drivers, and Tactrix's driver refuses a second open with error 5 (2026-11-11).
 
 ### Claiming the interface on macOS **[V]**
 
@@ -117,6 +118,18 @@ This driver records which interfaces had a kernel driver at open and reattaches
 them at close. That behaviour comes from a report on Linux hardware
 (2026-09-21) and matches how `cdc_acm` works; this project's own cable has not
 been tested on Linux hardware.
+
+### The cable hangs after a wrong-rate connect **[V]**
+
+Opening a CAN channel at 250 kbit/s on a live 500 kbit/s bus and closing it
+again sometimes leaves the cable silent: the close goes unanswered, so does
+every later command, and after a few the cable stops taking USB data. Measured
+on 2026-11-12 on Windows through Tactrix's driver, in the `sweep_connect`
+scenario of `j2534_trace`: once in six rounds through this driver and once in
+three through Tactrix's DLL, both times at that close. Replugging the USB did
+not bring it back while the vehicle connector still powered it, nor did a
+power cycle of the connector with the USB in; removing both at once did. A tool
+that tries bit rates on a live bus can hang the cable this way.
 
 ### The cable discards frames a host does not collect **[V]**
 
@@ -161,6 +174,18 @@ Send the line and its payload in one write, as Tactrix's DLL does
 (`tools/ab-official/out/vendor.tap`). A payload that follows its line about
 15 ms later draws `are 10`, and the cable then reads the payload as the start of
 the next command, which goes unanswered (measured 2026-10-23).
+
+Never stop sending a command part way, even at the caller's timeout **[P]**.
+On 2026-11-12, through Tactrix's Windows driver with no ECU answering, a
+4,099-byte ISO 15765 transmit with a 100 ms timeout was still being taken
+over USB when the timeout passed; cutting the transfer there made the next
+command go unanswered in one of two runs. The cable probably takes a long
+payload only as fast as it can segment it, so it holds the rest back while it
+waits for flow control, within the budget the command gives it. Each transport
+now carries a started command on for up to 2 s past the timeout
+(`OP_WRITE_GRACE_MS`), and gives up at the timeout only when nothing has gone;
+the same transmit then returned `ERR_TIMEOUT` in 105 ms with the next command
+answered, in 5 of 5 runs, as Tactrix's DLL does (108 ms).
 
 Device to host: two kinds of data on the same pipe.
 
@@ -330,8 +355,7 @@ ato3 0 10400 3 7 / atw3 51 8       ISO 9141 connect, five-baud init to 0x33
 - `PassThruReadVersion` is answered from the `ati` reply kept from open.
 
 This driver sends the same commands with the same arguments, except that it
-opens with `\r\n\r\n`, `atz`, `ata`, `ati`, and numbers a `Timeout=0` transmit
-so that its late reply can be recognised and dropped.
+opens with `\r\n\r\n`, `atz`, `ata`, `ati`.
 
 ---
 

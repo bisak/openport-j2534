@@ -141,8 +141,6 @@ The sweep skips these three so that the DLL's process survives.
 - Multi-message transmit budgets differ by the time already spent.
 - Open and close differ: this driver sends `\r\n\r\n`, `atz`, `ata`, `ati` at
   open, where Tactrix's sends `\r\n\r\n`, `ati`, `ata`.
-- A `Timeout=0` write is numbered by this driver, so its late reply can be
-  recognised and dropped; Tactrix's sends it without a number.
 
 ## Where they agree
 
@@ -200,8 +198,9 @@ sends the same.
 reply at all, not even `are 9` on a dead bus, and while the firmware keeps
 trying, the next command (`atc6`) goes unanswered for about a second, so the
 DLL's `PassThruDisconnect` straight after returns `ERR_TIMEOUT`. Numbered, the
-same transmit answers `are 9 <n>` after 1.0 s. This driver numbers it and does
-not wait, so the late reply is recognised and dropped.
+same transmit answers `are 9 <n>` after 1.0 s. This driver also sends it
+unnumbered and does not wait. Numbered, the cable answers each one, and a
+50-frame write took 0.4 ms a frame longer than through Tactrix's DLL (2026-11-13).
 
 **Other commands.**
 

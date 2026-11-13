@@ -15,6 +15,7 @@
 #include "op_device.h"
 #include "op_error.h"
 #include "op_log.h"
+#include "op_env.h"
 #include "op_proto.h"
 
 #include <stdarg.h>
@@ -61,10 +62,19 @@ static void rec_msg(const PASSTHRU_MSG *m)
     rec_hex(m->Data, m->DataSize > J2534_MSG_DATA_MAX ? J2534_MSG_DATA_MAX : m->DataSize);
 }
 
+/* Ends a record line. Flushed by hand: Windows has no line buffering, and a
+ * recording is read while the program is still running or after it crashed. */
+static void rec_end(void)
+{
+    fputc('\n', g_rec);
+    fflush(g_rec);
+}
+
 static int rec_on(void)
 {
     if (g_rec == NULL) {
-        const char *path = getenv("OPENPORT_RECORD");
+        char buf[1024];
+        const char *path = op_getenv("OPENPORT_RECORD", buf, sizeof buf);
         if (path != NULL && *path != '\0') g_rec = fopen(path, "a");
     }
     return g_rec != NULL;
@@ -78,8 +88,7 @@ static void rec_line(const char *fmt, ...)
     va_start(ap, fmt);
     vfprintf(g_rec, fmt, ap);
     va_end(ap);
-    fputc('\n', g_rec);
-    fflush(g_rec);      /* by hand: Windows has no line buffering */
+    rec_end();
 }
 
 static void rec_msgs(const char *head, const PASSTHRU_MSG *m, J_U32 n)
@@ -89,8 +98,7 @@ static void rec_msgs(const char *head, const PASSTHRU_MSG *m, J_U32 n)
     fputs(head, g_rec);
     if (m == NULL) n = 0;
     for (i = 0; i < n && i < 64; i++) rec_msg(&m[i]);
-    fputc('\n', g_rec);
-    fflush(g_rec);
+    rec_end();
 }
 
 /* A reason set deeper down (a size range, a dead K-line) is kept; only a
@@ -764,7 +772,7 @@ long J2534_API PassThruStartMsgFilter(J_U32 ChannelID, J_U32 FilterType,
     if (rec_on()) {
         fprintf(g_rec, "filter %lu %lu", (unsigned long)ChannelID, (unsigned long)FilterType);
         rec_msg(pMaskMsg); rec_msg(pPatternMsg); rec_msg(pFlowControlMsg);
-        fputc('\n', g_rec);
+        rec_end();
     }
     if (!d->open) return fail(ERR_INVALID_DEVICE_ID, "PassThruStartMsgFilter");
     if (channel_of(d, ChannelID) == NULL)
@@ -1130,7 +1138,7 @@ long J2534_API PassThruIoctl(J_U32 ChannelID, J_U32 IoctlID, const void *pInput,
                 fprintf(g_rec, " %lu=%lu", (unsigned long)l->ConfigPtr[i].Parameter,
                         IoctlID == SET_CONFIG ? (unsigned long)l->ConfigPtr[i].Value : 0UL);
         }
-        fputc('\n', g_rec);
+        rec_end();
     }
     if (!d->open) return fail(ERR_INVALID_DEVICE_ID, "PassThruIoctl");
 

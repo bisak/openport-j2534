@@ -1,0 +1,78 @@
+# Every layer that needs no cable, on the three systems the driver ships for.
+# The Windows DLLs are built once, cross, as a release would build them, and
+# then run on a real Windows machine: the unit tests, the simulator over a
+# named pipe (the same handle path as Tactrix's USB driver), and regsvr32
+# with the DLL loaded from the registry as a J2534 application loads it.
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev
+      - run: make CFLAGS="-O2 -g -Werror"
+      - run: make test
+      - run: make sanitize fuzz
+      - run: make sim
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install libusb
+      - run: make CFLAGS="-O2 -g -Werror"
+      - run: make check-all
+
+  windows-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: 32-bit
+        run: make CC=i686-w64-mingw32-gcc CFLAGS="-O2 -g -Werror" all smoke kline iso15765 build/win32/run_tests.exe
+      - name: 64-bit
+        run: make CC=x86_64-w64-mingw32-gcc CFLAGS="-O2 -g -Werror" all smoke kline iso15765 build/win64/run_tests.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-dlls
+          path: |
+            build/win32/*.dll
+            build/win32/*.exe
+            build/win64/*.dll
+            build/win64/*.exe
+          if-no-files-found: error
+
+  windows:
+    needs: windows-build
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { bits: 32, python: x86 }
+          - { bits: 64, python: x64 }
+    env:
+      OPENPORT_LIB: ${{ github.workspace }}\build\win${{ matrix.bits }}\openport-j2534-${{ matrix.bits }}.dll
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-dlls
+          path: build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.python }}
+      - name: unit tests
+        run: build\win${{ matrix.bits }}\run_tests.exe
+      - name: simulator over a named pipe
+        run: python tests\sim\run_scenarios.py
+      - name: regsvr32 and loading from the registry
+        run: python tests\windows\registry_check.py $env:OPENPORT_LIB

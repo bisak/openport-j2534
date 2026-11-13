@@ -28,14 +28,19 @@ own DLL).
 SPDX-License-Identifier: GPL-3.0-or-later
 """
 import argparse
+import itertools
 import os
-import pty
 import select
 import struct
 import sys
 import threading
 import time
 from collections import namedtuple
+
+if os.name == "nt":
+    import _winapi
+else:
+    import pty
 
 FW_VERSION = "1.17.4877"
 
@@ -293,6 +298,7 @@ class OpenPortSim:
         self._wake_r, self._wake_w = os.pipe()
         os.set_blocking(self._wake_r, False)
         os.set_blocking(self._wake_w, False)
+        self._out_ready = threading.Event()     # the same wake, for the named-pipe pump
         self._rng = 0x2545F4914F6CDD1D
 
     # -- helpers ----------------------------------------------------------
@@ -318,6 +324,7 @@ class OpenPortSim:
             if self._wake_w is not None:
                 try: os.write(self._wake_w, b"\0")
                 except BlockingIOError: pass    # a wake is already pending
+            self._out_ready.set()
 
     def _reply(self, text):
         if self.faults.drop_reply_every:
@@ -854,7 +861,7 @@ class OpenPortSim:
 
     # -- pty pump ---------------------------------------------------------
     def serve(self, master_fd, stop_evt):
-        line, pend, want = b"", b"", 0
+        cmds = _Commands(self)
         while not stop_evt.is_set() and not self.closed:
             r, _, _ = select.select([master_fd, self._wake_r], [], [], 0.02)
             if self._wake_r in r:
@@ -864,22 +871,7 @@ class OpenPortSim:
                 try: data = os.read(master_fd, 4096)
                 except OSError: break
                 if not data: break
-                for b in data:
-                    if want:
-                        pend += bytes([b])
-                        want -= 1
-                        if want == 0:
-                            self.handle(line, pend); line, pend = b"", b""
-                        continue
-                    if b == 0x0A:
-                        want = self._declared_payload(line)
-                        if want == 0:
-                            self.handle(line, b""); line = b""
-                        else:
-                            pend = b""
-                        continue
-                    if b != 0x0D:
-                        line += bytes([b])
+                cmds.feed(data)
             with self._lock:
                 out, self._out = self._out, b""
             if out:
@@ -887,10 +879,43 @@ class OpenPortSim:
                 except OSError: break
         try: os.close(master_fd)
         except OSError: pass
+        self._close_wake()
+
+    def _close_wake(self):
         with self._lock:
+            if self._wake_w is None:
+                return
             os.close(self._wake_r)
             os.close(self._wake_w)
             self._wake_w = None
+
+    # -- named-pipe pump (Windows) ------------------------------------------
+    # The driver opens the pipe as it opens Tactrix's device interface: a
+    # handle that is not a serial port, read and written with overlapped I/O.
+    # One instance is always listening, so a reopen straight after a close
+    # never finds the pipe busy. A second client while the first is still
+    # connected is turned away, as the cable's driver turns it away (MODELLED:
+    # the cable refuses the open; here the client's first transfer fails).
+    def serve_pipe(self, name, listening, stop_evt):
+        session = None
+        try:
+            while not stop_evt.is_set() and not self.closed:
+                if not _pipe_accept(listening, stop_evt, self):
+                    break
+                client, listening = listening, _pipe_instance(name)
+                if session is not None and session.alive():
+                    self._log("  [pipe] a second client while one is connected: refused")
+                    _winapi.CloseHandle(client)
+                    continue
+                if session is not None:
+                    session.stop()          # its client has gone; it must not take replies
+                session = _PipeSession(self, client, stop_evt)
+                session.start()
+        finally:
+            _winapi.CloseHandle(listening)
+            if session is not None:
+                session.stop()
+            self._close_wake()
 
     @staticmethod
     def _declared_payload(line):
@@ -912,8 +937,145 @@ class OpenPortSim:
         return 0
 
 
+class _Commands:
+    """The host's byte stream, split into command lines and their payloads."""
+
+    def __init__(self, sim):
+        self.sim, self.line, self.pend, self.want = sim, b"", b"", 0
+
+    def feed(self, data):
+        for b in data:
+            if self.want:
+                self.pend += bytes([b])
+                self.want -= 1
+                if self.want == 0:
+                    self.sim.handle(self.line, self.pend)
+                    self.line, self.pend = b"", b""
+                continue
+            if b == 0x0A:
+                self.want = self.sim._declared_payload(self.line)
+                if self.want == 0:
+                    self.sim.handle(self.line, b"")
+                    self.line = b""
+                else:
+                    self.pend = b""
+                continue
+            if b != 0x0D:
+                self.line += bytes([b])
+
+
+_pipe_ids = itertools.count()
+
+
+def _pipe_instance(name):
+    return _winapi.CreateNamedPipe(
+        name, _winapi.PIPE_ACCESS_DUPLEX | _winapi.FILE_FLAG_OVERLAPPED,
+        _winapi.PIPE_WAIT,                  # byte type and byte reads: both 0
+        _winapi.PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, _winapi.NULL)
+
+
+def _pipe_accept(handle, stop_evt, sim):
+    """Waits for a client on one listening instance; False once stopped."""
+    ov = _winapi.ConnectNamedPipe(handle, overlapped=True)
+    while True:
+        r = _winapi.WaitForMultipleObjects([ov.event], False, 100)
+        if r == _winapi.WAIT_OBJECT_0:
+            try: ov.GetOverlappedResult(True)
+            except OSError: pass            # a client that connected and left at once
+            return True
+        if stop_evt.is_set() or sim.closed:
+            ov.cancel()
+            try: ov.GetOverlappedResult(True)
+            except OSError: pass
+            return False
+
+
+class _PipeSession:
+    """One connected client: a thread reading commands, one writing replies."""
+
+    def __init__(self, sim, handle, stop_evt):
+        self.sim, self.h, self.stop_evt = sim, handle, stop_evt
+        self.ended = threading.Event()
+        self.threads = [threading.Thread(target=self._reader, daemon=True),
+                        threading.Thread(target=self._writer, daemon=True)]
+
+    def start(self):
+        for t in self.threads:
+            t.start()
+
+    def alive(self):
+        if self.ended.is_set():
+            return False
+        try:
+            _winapi.PeekNamedPipe(self.h)
+            return True
+        except OSError:
+            return False
+
+    def stop(self):
+        self.ended.set()
+        self.sim._out_ready.set()
+        for t in self.threads:
+            t.join(2)
+
+    def _end(self):
+        if not self.ended.is_set():
+            self.ended.set()
+            self.sim._out_ready.set()
+
+    def _running(self):
+        return not (self.ended.is_set() or self.stop_evt.is_set() or self.sim.closed)
+
+    def _reader(self):
+        cmds = _Commands(self.sim)
+        try:
+            while self._running():
+                try:
+                    ov, err = _winapi.ReadFile(self.h, 4096, overlapped=True)
+                except OSError:
+                    break                   # the client closed its end
+                while _winapi.WaitForMultipleObjects([ov.event], False, 100) != _winapi.WAIT_OBJECT_0:
+                    if not self._running():
+                        ov.cancel()
+                        break
+                try:
+                    n, err = ov.GetOverlappedResult(True)
+                except OSError:
+                    break
+                if err or n == 0:
+                    break
+                cmds.feed(ov.getbuffer())
+        finally:
+            self._end()
+            for t in self.threads:
+                if t is not threading.current_thread():
+                    t.join(2)
+            _winapi.CloseHandle(self.h)
+
+    def _writer(self):
+        sim = self.sim
+        while self._running():
+            sim._out_ready.wait(0.1)
+            with sim._lock:
+                sim._out_ready.clear()
+                out, sim._out = sim._out, b""
+            if not out or not self._running():
+                continue
+            try:
+                ov, err = _winapi.WriteFile(self.h, out, overlapped=True)
+                n, err = ov.GetOverlappedResult(True)
+            except OSError:
+                n, err = 0, 1
+            if err or n != len(out):
+                break
+        self._end()
+
+
 def spawn(ecu=None, faults=None, log=None, wire=None):
-    """Start a simulator on a pty. Returns (slave_path, stop_event, thread, sim)."""
+    """Start a simulator on a pty, or on Windows a named pipe. Returns
+    (device_path, stop_event, thread, sim)."""
+    if os.name == "nt":
+        return _spawn_pipe(ecu, faults, log, wire)
     master, slave = pty.openpty()
     path = os.ttyname(slave)
     # The slave fd is deliberately kept open. Closing it deallocates the pty on
@@ -928,6 +1090,18 @@ def spawn(ecu=None, faults=None, log=None, wire=None):
     th = threading.Thread(target=sim.serve, args=(master, stop), daemon=True)
     th.start()
     sim._slave_fd = slave
+    return path, stop, th, sim
+
+
+def _spawn_pipe(ecu, faults, log, wire):
+    path = rf"\\.\pipe\openport-sim-{os.getpid()}-{next(_pipe_ids)}"
+    sim = OpenPortSim(ecu=ecu, faults=faults, log=log, wire=wire)
+    if faults and faults.startup_backlog:
+        sim._emit(b"aro\r\n" * faults.startup_backlog)
+    listening = _pipe_instance(path)      # before returning: the driver may open at once
+    stop = threading.Event()
+    th = threading.Thread(target=sim.serve_pipe, args=(path, listening, stop), daemon=True)
+    th.start()
     return path, stop, th, sim
 
 

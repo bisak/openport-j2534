@@ -44,6 +44,16 @@ struct op_transport {
     void                   *impl;
 };
 
+/* A command goes to the cable whole or not at all: a part of one leaves the
+ * cable reading the next command as the rest of its payload. The cable can
+ * hold a long payload back while it works, waiting for an ISO 15765 flow
+ * control for as long as the budget the command itself gives it, so a write
+ * that has started is carried on this long past the caller's timeout. Only a
+ * write that has sent nothing gives up at the timeout. Measured 2026-11-12: a
+ * 4099-byte ISO 15765 transmit with no ECU answering, cut at 100 ms, made the
+ * next command time out. */
+#define OP_WRITE_GRACE_MS 2000u
+
 /* Open the first attached OpenPort over USB bulk endpoints. Not on Windows,
  * where the build has no libusb. */
 op_status op_usb_open(op_transport *out);

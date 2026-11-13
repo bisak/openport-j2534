@@ -43,39 +43,39 @@ echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="cc4d", MODE="0
 
 ### Windows
 
-Build with MinGW-w64, on Windows under MSYS2 or cross-compiled on macOS or
-Linux. No libusb is needed.
+Download `openport-j2534-<version>-windows.zip` from the
+[releases](https://github.com/bisak/openport-j2534/releases), unpack it where
+it will stay, and register each DLL from an administrator Command Prompt in
+that folder:
+
+```bat
+C:\Windows\SysWOW64\regsvr32 win32\openport-j2534-32.dll
+C:\Windows\System32\regsvr32 win64\openport-j2534-64.dll
+```
+
+J2534 applications then list "OpenPort 2.0 (openport-j2534)", beside Tactrix's
+own entry if that is installed: 32-bit applications (most of them) the 32-bit
+DLL, 64-bit ones the 64-bit DLL. `regsvr32 /u` removes the entry again. A DLL
+needs no other file.
+
+The cable needs a USB driver: Tactrix's, installed with Tactrix's software,
+or, with none installed, the USB serial driver Windows 10 and later give the
+cable by themselves. `op_probe.exe` shows which one the cable has. Tactrix's
+driver is the one tested with this release; the USB serial driver was last
+tested with an earlier version of the Windows code.
+
+To build the DLLs yourself, use MinGW-w64, on Windows under MSYS2 or
+cross-compiled on macOS or Linux; no libusb is needed:
 
 ```bash
-# 32-bit: what most J2534 applications are
+# 32-bit, into build/win32
 make CC=i686-w64-mingw32-gcc
-# 64-bit
+# 64-bit, into build/win64
 make CC=x86_64-w64-mingw32-gcc
 ```
 
-That makes `build/win32/openport-j2534-32.dll` and
-`build/win64/openport-j2534-64.dll`, with `op_probe.exe` beside each. A DLL
-needs no other file. Keep the DLLs wherever you like and register each one from
-an administrator prompt; J2534 applications then list
-"OpenPort 2.0 (openport-j2534)":
-
-```bat
-C:\Windows\SysWOW64\regsvr32 openport-j2534-32.dll
-C:\Windows\System32\regsvr32 openport-j2534-64.dll
-```
-
-`regsvr32 /u` removes the entry again.
-
-The cable needs a USB driver, and the library works with either of two.
-With Tactrix's installed, both DLLs can be used, each chosen by name in the
-application. With none installed, Windows 10 and later give the cable their
-own USB serial driver and a COM port, which the library finds by the cable's
-USB id. `op_probe.exe` shows which driver the cable has.
-
-Tested on Windows 10 with each of the two drivers, against a bench ECU; what
-was and was not covered is in
-[docs/TESTING.md](docs/TESTING.md#the-windows-build). No J2534 application has
-been tried with it yet. Please report what you see.
+What was tested on Windows, and how:
+[docs/TESTING.md](docs/TESTING.md#the-windows-build).
 
 ## Check that it works
 
@@ -148,8 +148,7 @@ difference from Tactrix's driver: [docs/API.md](docs/API.md).
 | J1850, SCI | Not supported by the cable. |
 
 Tested with cable firmware 1.17.4877 on macOS (Apple Silicon) and on Linux
-(Ubuntu 24.04), and on Windows 10 (64-bit) with Tactrix's USB driver and with
-Windows' own.
+(Ubuntu 24.04), and on Windows 10 (64-bit) with Tactrix's USB driver.
 
 ## Troubleshooting
 
@@ -161,7 +160,7 @@ with the cable.
 |---|---|
 | `PassThruOpen` returns 8, "USB mass storage" | A microSD card is in the cable. Remove it and re-plug. |
 | `PassThruOpen` returns 8, no cable found | Check the connection with `op_probe`. |
-| `PassThruOpen` returns 14 | Another program holds the cable, or on Linux the udev rule is missing. |
+| `PassThruOpen` returns 14 | Another program holds the cable, or on Linux the udev rule is missing. 3D-printer software that looks for printers on serial ports (UltiMaker Cura, for one) opens the cable's serial device on macOS as soon as it is plugged in, and keeps it; quit it first. On macOS, `lsof /dev/cu.usbmodem*` shows which program has it. |
 | On Windows, `PassThruOpen` returns 8, "its driver gives no access" | The cable has a driver that is neither Tactrix's nor the Windows USB serial driver (one installed with Zadig, for example). Run `op_probe.exe`; remove that driver in Device Manager. |
 | Every transmit returns 9 (`ERR_TIMEOUT`) | Nothing on the bus acknowledged the frame: no ECU connected, or the ignition is off. |
 | An ECU ignores ISO 15765 requests | Set the `ISO15765_FRAME_PAD` TxFlag. Many ECUs ignore unpadded frames. |
@@ -177,6 +176,9 @@ Do not run your tool with `sudo` to get around an error.
 | `OPENPORT_LOG_HEX=1` | Add every byte sent and received to that log. |
 | `OPENPORT_DEVICE=<path>` | Use this serial device: the cable's (`/dev/cu.usbmodem…`, `/dev/ttyACM0`, `COM7` on Windows) or the simulator's. `usb` uses libusb. Unset, macOS uses the cable's serial device, Linux uses libusb, and Windows uses Tactrix's driver or else the cable's COM port. |
 | `OPENPORT_RECORD=<file>` | Record every J2534 call, for replay against another driver. |
+
+On Windows these are read from the process's environment, so a program may set
+them itself before `PassThruOpen`.
 
 ## Safety
 
