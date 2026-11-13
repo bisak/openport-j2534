@@ -3,7 +3,7 @@
 ## What helps most
 
 **Data from a vehicle this driver has not seen**, above all one that answers on
-K-line: K-line is implemented but has never been confirmed on a car.
+K-line. K-line is implemented but has never been confirmed on a car.
 `tools/car/car-session.sh` runs a read-only session and archives everything;
 [docs/CAR-SESSION.md](docs/CAR-SESSION.md) explains what it sends and why each
 request is safe. Attach the archive to an
@@ -17,7 +17,7 @@ vehicle's VIN and contains the cable's serial number
 limit.
 
 **Support for another cable.** The transport interface is
-`src/op_transport.h`; a new cable is a new transport, not a rewrite.
+`src/op_transport.h`. A new cable needs a new transport, not a rewrite.
 
 ## Build and test
 
@@ -65,7 +65,7 @@ A change is ready when:
 | Path | What |
 |---|---|
 | `include/j2534/j2534.h` | The J2534 API, plus Tactrix's own constants |
-| `src/op_j2534.c` | The fourteen `PassThru*` functions |
+| `src/op_j2534.c` | The 14 `PassThru*` functions |
 | `src/op_device.c` | Channels, the reader thread, reassembly, matching replies to commands |
 | `src/op_proto.c` | Encoding commands and decoding replies; no I/O, fully unit-tested |
 | `src/op_transport.h`, `op_usb.c`, `op_serial.c` | The byte pipe to the cable: libusb, or the serial device |
@@ -74,7 +74,7 @@ A change is ready when:
 | `src/op_log.c`, `op_error.c` | `OPENPORT_LOG`, and the `PassThruGetLastError` text |
 | `examples/` | `op_smoke`, `op_iso15765`, `op_kline`: end-to-end checks on a cable |
 | `tests/unit/`, `tests/mock/` | Unit tests over a mock transport, and vehicle recordings |
-| `tests/sim/` | A simulated cable behind a pty, with fault injection |
+| `tests/sim/` | A simulated cable behind a pty, or a named pipe on Windows, with fault injection |
 | `tests/windows/` | The Windows DLL under Wine against the native library; `regsvr32` and loading from the registry, on Windows |
 | `.github/workflows/` | CI on Linux, macOS and Windows; the Windows DLLs attached to each release |
 | `tests/fuzz/` | Fuzzer for the reply parser |

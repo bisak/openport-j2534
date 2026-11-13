@@ -16,6 +16,7 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -26,8 +27,12 @@ jobs:
       - run: make sanitize fuzz
       - run: make sim
 
+  # GitHub's macOS runners are sometimes not available for 15 minutes or more.
+  # A release ships only the Windows zip, so it does not wait for this job.
   macos:
+    if: github.event_name != 'release'
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -38,6 +43,7 @@ jobs:
 
   windows-build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -60,6 +66,7 @@ jobs:
   windows:
     needs: windows-build
     runs-on: windows-2022
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
