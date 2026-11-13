@@ -822,12 +822,16 @@ class OpenPortSim:
         self._reply(self._with_seq(f"arm{ch} {pid}"))
 
     def _periodic_run(self, ch, c, pid):
+        # On a fixed schedule, as the firmware keeps it: a late wake-up on a
+        # busy host does not push every later transmission back.
+        due = time.monotonic()
         while not self.closed and self.channels.get(ch) is c:
             entry = c.periodic.get(pid)
             if entry is None:
                 break
             interval, payload, txflags = entry
-            time.sleep(interval)
+            due += interval
+            time.sleep(max(0.0, due - time.monotonic()))
             if self.channels.get(ch) is not c or pid not in c.periodic:
                 break
             self.tx_count += 1
