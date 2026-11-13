@@ -250,9 +250,11 @@ static op_status usb_write(op_transport *t, const uint8_t *buf, size_t len,
      * desynchronise the device's parser. */
     while (sent < len) {
         int moved = 0;
+        /* Part of the command is out: the rest must follow (OP_WRITE_GRACE_MS). */
         int r = libusb_bulk_transfer(u->handle, u->ep_out,
                                      (unsigned char *)(uintptr_t)(buf + sent),
-                                     (int)(len - sent), &moved, timeout_ms);
+                                     (int)(len - sent), &moved,
+                                     sent > 0 ? OP_WRITE_GRACE_MS : timeout_ms);
         if (r != LIBUSB_SUCCESS) {
             op_logf("usb_write: %s after %zu/%zu bytes",
                     libusb_error_name(r), sent, len);

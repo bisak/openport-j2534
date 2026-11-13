@@ -8,6 +8,7 @@
  * ab_diff.py. Nothing here knows which library it is driving.
  *
  *   j2534_trace <library> <trace.jsonl> [scenario ...] [--repeat N] [--cycles N]
+ *               [--load N] [--load-id HEX] [--seconds S] [--capture FILE]
  *   j2534_trace <library> <trace.jsonl> --replay <record>
  *
  * --replay executes a call recording made by the driver (OPENPORT_RECORD=file,
@@ -19,7 +20,8 @@
  *
  * Scenarios: open iso15765 multiframe timeouts errors periodic raw_can kline bench
  * sweep_connect sweep_config sweep_filter sweep_tx ("sweep" runs all four) edge
- * (default: all but kline, bench, the sweeps and edge).
+ * stream thread_writes (default: all but kline, bench, the sweeps, edge, stream
+ * and thread_writes).
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -36,6 +38,7 @@
 #  define _DARWIN_C_SOURCE 1
 #  include <dlfcn.h>
 #  include <time.h>
+#  include <pthread.h>
 #  include <unistd.h>
 #  define J2534_CALL
 #endif
@@ -426,6 +429,225 @@ static void sc_bench(void)
     STEP(sc, "PassThruClose", api.close(dev), NULL);
 }
 
+
+/* stream: the cable's own periodic frames, --load of them from --load-id up
+ * (0x6F0, 0x6F1, ...), each every 1 ms with the bytes {i, 'L','O','A','D', 0,
+ * 0, 0}, and whatever else the bus carries, for --seconds. Choose ids no node
+ * on the bus acts on. The cable reports each frame it sends from its schedule
+ * as one it received. Then the load stops and everything still queued is
+ * read, so the counts are every frame the library delivered. Another logger
+ * on the same bus that saw the whole load gives the count it should be:
+ * frames the cable discarded while the host was not reading are the
+ * difference (PROTOCOL.md section 1). The cable's schedule is not exact, so
+ * gaps in one log prove nothing. --capture writes every frame as a line of
+ * receipt in microseconds on the cable's clock, hex id and hex data. */
+static int stream_load = 3, stream_seconds = 10;
+static J_U32 stream_load_id = 0x6F0;
+static const char *stream_capture;
+#define STREAM_LOAD_MAX 10
+#define STREAM_IDS 64
+static struct { J_U32 id; unsigned long n; } stream_ids[STREAM_IDS];
+static int stream_nids;
+static unsigned long long stream_high;
+static unsigned long stream_last_raw, stream_total, stream_errors;
+static int stream_started;
+
+/* One read's messages into the counts and the capture; how many of them
+ * were load frames. */
+static J_U32 stream_take(J_U32 ch, FILE *cap, J_U32 timeout, int nload)
+{
+    static PASSTHRU_MSG in[256];
+    J_U32 n = 256, k, loads = 0;
+    long rc = api.read(ch, in, &n, timeout);
+    if (rc != STATUS_NOERROR && rc != ERR_TIMEOUT && rc != ERR_BUFFER_EMPTY) stream_errors++;
+    if (n > 256) n = 0;
+    for (k = 0; k < n; k++) {
+        const PASSTHRU_MSG *m = &in[k];
+        unsigned long long ts;
+        J_U32 id, b;
+        int j;
+        if (m->DataSize < 4 || (m->RxStatus & (TX_MSG_TYPE | START_OF_MESSAGE))) continue;
+        id = ((J_U32)m->Data[0] << 24) | ((J_U32)m->Data[1] << 16) | ((J_U32)m->Data[2] << 8) | m->Data[3];
+        if (stream_started && (unsigned long)m->Timestamp < stream_last_raw
+            && stream_last_raw - (unsigned long)m->Timestamp > 0x80000000ul)
+            stream_high += 0x100000000ull;
+        stream_last_raw = (unsigned long)m->Timestamp;
+        stream_started = 1;
+        ts = stream_high + (unsigned long long)m->Timestamp;
+        stream_total++;
+        for (j = 0; j < stream_nids && stream_ids[j].id != id; j++) {}
+        if (j == stream_nids && stream_nids < STREAM_IDS) { stream_ids[j].id = id; stream_ids[j].n = 0; stream_nids++; }
+        if (j < stream_nids) stream_ids[j].n++;
+        if (id >= stream_load_id && id < stream_load_id + (J_U32)nload) loads++;
+        if (cap) {
+            fprintf(cap, " %llu %0*lX ", ts, id > 0x7FF ? 8 : 3, (unsigned long)id);
+            for (b = 4; b < m->DataSize; b++) fprintf(cap, "%02X", m->Data[b]);
+            fputc('\n', cap);
+        }
+    }
+    return loads;
+}
+
+static void sc_stream(void)
+{
+    const char *sc = "stream";
+    J_U32 dev = 0, ch = 0, fid = 0, pid[STREAM_LOAD_MAX];
+    int nload, i, quiet;
+    double t0, end;
+    FILE *cap = NULL;
+    PASSTHRU_MSG mask, pat;
+    char d[2048];
+    size_t dl;
+
+    nload = stream_load < 0 ? 0 : stream_load > STREAM_LOAD_MAX ? STREAM_LOAD_MAX : stream_load;
+    stream_nids = 0; stream_total = stream_errors = 0; stream_started = 0; stream_high = 0;
+    if (stream_capture && !(cap = fopen(stream_capture, "w"))) { perror(stream_capture); return; }
+    if (do_open(sc, &dev) != 0) goto done;
+    if (do_connect(sc, dev, CAN, 500000, &ch) == 0) {
+        memset(&mask, 0, sizeof mask); memset(&pat, 0, sizeof pat);
+        mask.ProtocolID = pat.ProtocolID = CAN; mask.DataSize = pat.DataSize = 4;
+        STEP(sc, "StartMsgFilter PASS all", api.filter(ch, PASS_FILTER, &mask, &pat, NULL, &fid), NULL);
+        STEP(sc, "Ioctl CLEAR_RX_BUFFER", api.ioctl(ch, CLEAR_RX_BUFFER, NULL, NULL), NULL);
+        for (i = 0; i < nload; i++) {
+            J_U32 id = stream_load_id + (J_U32)i;
+            unsigned char f[12] = { 0, 0, 0, 0, 0, 'L', 'O', 'A', 'D', 0, 0, 0 };
+            PASSTHRU_MSG m;
+            f[0] = (unsigned char)(id >> 24); f[1] = (unsigned char)(id >> 16);
+            f[2] = (unsigned char)(id >> 8);  f[3] = (unsigned char)id;
+            f[4] = (unsigned char)i;
+            mk_msg(&m, CAN, 0, f, sizeof f);
+            STEP(sc, "StartPeriodicMsg 1ms load", api.startp(ch, &m, &pid[i], 1), NULL);
+        }
+        t0 = now_us();
+        end = t0 + stream_seconds * 1e6;
+        while (now_us() < end) stream_take(ch, cap, 20, nload);
+        for (i = 0; i < nload; i++) STEP(sc, "StopPeriodicMsg", api.stopp(ch, pid[i]), NULL);
+        /* The bus carries on; what is left of the load comes first. */
+        end = now_us() + 10e6;
+        for (quiet = 0; quiet < 3 && now_us() < end; )
+            quiet = stream_take(ch, cap, 200, nload) ? 0 : quiet + 1;
+        dl = (size_t)snprintf(d, sizeof d, "\"seconds\":%d,\"load\":%d,\"frames\":%lu,\"read_errors\":%lu,\"ids\":{",
+                              stream_seconds, nload, stream_total, stream_errors);
+        for (i = 0; i < stream_nids && dl < sizeof d - 32; i++)
+            dl += (size_t)snprintf(d + dl, sizeof d - dl, "%s\"%lX\":%lu", i ? "," : "",
+                                   (unsigned long)stream_ids[i].id, stream_ids[i].n);
+        snprintf(d + dl, sizeof d - dl, "}");
+        record(sc, "stream", STATUS_NOERROR, t0, d);
+        fprintf(stderr, "stream: %lu frames, %lu read errors;", stream_total, stream_errors);
+        for (i = 0; i < stream_nids; i++)
+            fprintf(stderr, " %lX %lu", (unsigned long)stream_ids[i].id, stream_ids[i].n);
+        fputc('\n', stderr);
+        STEP(sc, "PassThruDisconnect", api.disconnect(ch), NULL);
+    }
+    STEP(sc, "PassThruClose", api.close(dev), NULL);
+done:
+    if (cap) fclose(cap);
+}
+
+/* thread_writes: --cycles threads one after another, each writing 50 CAN
+ * frames on --load-id with a Timeout of 0 and exiting at once, as an
+ * application with a short-lived sender does. Windows cancels a thread's
+ * pending I/O when the thread exits, so a library that returns with its USB
+ * write still pending loses frames here. With LOOPBACK on, the frames the
+ * cable sent come back; each carries its number, so the count shows what was
+ * lost and the order what was reordered. */
+#define TW_BATCH 50
+static J_U32 tw_ch;
+static unsigned long tw_next, tw_bad_writes;
+
+#ifdef _WIN32
+static DWORD WINAPI tw_writer(LPVOID arg)
+#else
+static void *tw_writer(void *arg)
+#endif
+{
+    static PASSTHRU_MSG m[TW_BATCH];
+    J_U32 n = TW_BATCH, k;
+    long rc;
+    (void)arg;
+    for (k = 0; k < TW_BATCH; k++) {
+        unsigned long v = ++tw_next;
+        unsigned char f[12] = { 0, 0, 0, 0, 'T', 'W', 0, 0, 0, 0, 0, 0 };
+        f[2] = (unsigned char)(stream_load_id >> 8); f[3] = (unsigned char)stream_load_id;
+        f[8] = (unsigned char)(v >> 24); f[9] = (unsigned char)(v >> 16);
+        f[10] = (unsigned char)(v >> 8); f[11] = (unsigned char)v;
+        mk_msg(&m[k], CAN, 0, f, sizeof f);
+    }
+    rc = api.write(tw_ch, m, &n, 0);
+    if (rc != STATUS_NOERROR || n != TW_BATCH) tw_bad_writes++;
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+static unsigned long tw_seen, tw_disorder, tw_last;
+
+static void tw_take(J_U32 timeout)
+{
+    static PASSTHRU_MSG in[256];
+    J_U32 n = 256, k;
+    (void)api.read(tw_ch, in, &n, timeout);
+    if (n > 256) n = 0;
+    for (k = 0; k < n; k++) {
+        const unsigned char *d = in[k].Data;
+        unsigned long v;
+        /* The frame itself; LOOPBACK also gives a TX_MSG_TYPE indication
+         * of four zero bytes. */
+        if (in[k].DataSize != 12 || d[4] != 'T' || d[5] != 'W') continue;
+        v = ((unsigned long)d[8] << 24) | ((unsigned long)d[9] << 16) | ((unsigned long)d[10] << 8) | d[11];
+        if (v != tw_last + 1) tw_disorder++;
+        tw_last = v;
+        tw_seen++;
+    }
+}
+
+static void sc_thread_writes(void)
+{
+    const char *sc = "thread_writes";
+    J_U32 dev = 0, fid = 0;
+    SCONFIG cfg; SCONFIG_LIST list;
+    PASSTHRU_MSG mask, pat;
+    double t0, end;
+    char d[160];
+    int i;
+
+    tw_next = tw_bad_writes = tw_seen = tw_disorder = tw_last = 0;
+    if (do_open(sc, &dev) != 0) return;
+    if (do_connect(sc, dev, CAN, 500000, &tw_ch) == 0) {
+        memset(&mask, 0, sizeof mask); memset(&pat, 0, sizeof pat);
+        mask.ProtocolID = pat.ProtocolID = CAN; mask.DataSize = pat.DataSize = 4;
+        mask.Data[2] = 0xFF; mask.Data[3] = 0xFF;
+        pat.Data[2] = (unsigned char)(stream_load_id >> 8); pat.Data[3] = (unsigned char)stream_load_id;
+        STEP(sc, "StartMsgFilter PASS load id", api.filter(tw_ch, PASS_FILTER, &mask, &pat, NULL, &fid), NULL);
+        cfg.Parameter = LOOPBACK; cfg.Value = 1; list.NumOfParams = 1; list.ConfigPtr = &cfg;
+        STEP(sc, "Ioctl SET_CONFIG LOOPBACK=1", api.ioctl(tw_ch, SET_CONFIG, &list, NULL), NULL);
+        t0 = now_us();
+        for (i = 0; i < bench_cycles; i++) {
+#ifdef _WIN32
+            HANDLE th = CreateThread(NULL, 0, tw_writer, NULL, 0, NULL);
+            if (th == NULL) break;
+            WaitForSingleObject(th, INFINITE);
+            CloseHandle(th);
+#else
+            pthread_t th;
+            if (pthread_create(&th, NULL, tw_writer, NULL) != 0) break;
+            pthread_join(th, NULL);
+#endif
+            tw_take(0);
+        }
+        end = now_us() + 3e6;
+        while (tw_seen < tw_next && now_us() < end) tw_take(200);
+        snprintf(d, sizeof d, "\"threads\":%d,\"frames\":%lu,\"echoed\":%lu,\"out_of_order\":%lu,\"failed_writes\":%lu",
+                 i, tw_next, tw_seen, tw_disorder, tw_bad_writes);
+        record(sc, "thread_writes", tw_seen == tw_next && !tw_disorder && !tw_bad_writes ? STATUS_NOERROR : ERR_FAILED, t0, d);
+        fprintf(stderr, "thread_writes: %d threads, %lu frames written, %lu echoed, %lu out of order, %lu writes failed\n",
+                i, tw_next, tw_seen, tw_disorder, tw_bad_writes);
+        STEP(sc, "PassThruDisconnect", api.disconnect(tw_ch), NULL);
+    }
+    STEP(sc, "PassThruClose", api.close(dev), NULL);
+}
 
 /* ---- replay ------------------------------------------------------------ */
 #define MAP_MAX 64
@@ -1095,6 +1317,7 @@ static const struct { const char *name; void (*fn)(void); int by_default; } SCEN
     { "raw_can", sc_raw_can, 1 }, { "kline", sc_kline, 0 }, { "bench", sc_bench, 0 },
     { "sweep_connect", sc_sweep_connect, 0 }, { "sweep_config", sc_sweep_config, 0 },
     { "sweep_filter", sc_sweep_filter, 0 }, { "sweep_tx", sc_sweep_tx, 0 }, { "edge", sc_edge, 0 },
+    { "stream", sc_stream, 0 }, { "thread_writes", sc_thread_writes, 0 },
 };
 
 /* "sweep" selects every sweep_* scenario. */
@@ -1116,6 +1339,10 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--repeat") && i + 1 < argc) repeat = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--cycles") && i + 1 < argc) bench_cycles = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--replay") && i + 1 < argc) replay_path = argv[++i];
+        else if (!strcmp(argv[i], "--load") && i + 1 < argc) stream_load = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) stream_seconds = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--load-id") && i + 1 < argc) stream_load_id = (J_U32)strtoul(argv[++i], NULL, 16);
+        else if (!strcmp(argv[i], "--capture") && i + 1 < argc) stream_capture = argv[++i];
         else if (nsel < 16) sel[nsel++] = argv[i];
     }
     out = strcmp(tracepath, "-") ? fopen(tracepath, "w") : stdout;

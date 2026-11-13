@@ -22,9 +22,12 @@ static inline void sleep_us(unsigned long us)
  * open, and Windows does not delete an open file. */
 #ifdef _WIN32
 #include <stdlib.h>
+#include <windows.h>
+/* Both copies: the library reads the process's (src/op_env.h). */
 static inline void test_setenv(const char *name, const char *value)
 {
     _putenv_s(name, value != NULL ? value : "");
+    SetEnvironmentVariableA(name, value);
 }
 static inline const char *test_tmpdir(void)
 {

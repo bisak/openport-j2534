@@ -22,6 +22,7 @@ import struct
 import io
 import os
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -63,7 +64,9 @@ class SCONFIG_LIST(ctypes.Structure):
 
 
 def load(lib_path):
-    d = ctypes.CDLL(lib_path)
+    # WinDLL: the 32-bit Windows DLL's functions are __stdcall. In a 64-bit
+    # process there is one convention, and WinDLL is CDLL.
+    d = (ctypes.WinDLL if os.name == "nt" else ctypes.CDLL)(lib_path)
     for n in ("PassThruOpen", "PassThruClose", "PassThruConnect", "PassThruDisconnect",
               "PassThruReadMsgs", "PassThruWriteMsgs", "PassThruStartMsgFilter",
               "PassThruStopMsgFilter", "PassThruIoctl", "PassThruReadVersion",
@@ -402,6 +405,41 @@ def s_loopback():
     stop.set()
 
 
+def s_dense_stream():
+    """The cable sends each received frame as its own packet and discards new
+    ones while 1.1 KB wait unread (PROTOCOL.md section 1), so the transport
+    has to keep reading. Here nothing is discarded: every frame must arrive,
+    in order, whatever the reads in flight."""
+    total = 20000
+    path, stop, th, sim = scenario(f"{total} frames back to back arrive whole and in order")
+    d = fresh_lib()
+    dev = U32(); d.PassThruOpen(None, ctypes.byref(dev))
+    ch, _ = connect(d, dev)
+
+    def flood():
+        for i in range(total):
+            sim.send_message(6, b"\x00\x00\x07\xe8" + struct.pack(">I", i))
+    gen = threading.Thread(target=flood, daemon=True)
+    gen.start()
+    got, errors, deadline = [], [], time.time() + 60
+    inbuf = (PASSTHRU_MSG * 256)()
+    while len(got) < total and time.time() < deadline:
+        cnt = U32(256)
+        rc = d.PassThruReadMsgs(ch, inbuf, ctypes.byref(cnt), 200)
+        if not read_ok(rc):
+            errors.append(rc)
+        for i in range(cnt.value):
+            if not (inbuf[i].RxStatus & (TX_MSG_TYPE | START_OF_MESSAGE)):
+                got.append(struct.unpack(">I", bytes(inbuf[i].Data[4:8]))[0])
+    gen.join(5)
+    check(len(got) == total, f"all {total} frames received", len(got))
+    first = next((k for k, v in enumerate(got) if v != k), None)
+    check(first is None, "in the order sent", f"first out of place at {first}")
+    check(not errors, "no read reported an error or a loss", errors[:5])
+    d.PassThruClose(dev)
+    stop.set()
+
+
 def s_periodic_keepalive():
     """
     A periodic keep-alive is scheduled by the firmware (`atm`/`atn`), as the
@@ -730,9 +768,13 @@ def s_chunking_models():
 
 SCENARIOS = [s_happy_path, s_multiframe, s_no_ack, s_backlog, s_dropped_reply,
              s_disconnect, s_idle_sim_does_not_spin, s_truncated, s_garbage, s_loopback,
+             s_dense_stream,
              s_periodic_keepalive, s_consumer_rule, s_tp20, s_tp20_silent_module,
              s_frame_pad, s_capture_tool_pads,
              s_chunking_models]
+
+# These drive tools/car/car_capture.py, which talks to a tty: macOS and Linux.
+NEEDS_TTY = {s_tp20, s_tp20_silent_module, s_capture_tool_pads}
 
 
 def main():
@@ -740,6 +782,9 @@ def main():
     only = sys.argv[1] if len(sys.argv) > 1 else None
     for s in SCENARIOS:
         if only and only not in s.__name__:
+            continue
+        if os.name == "nt" and s in NEEDS_TTY:
+            print(f"\n== {s.__name__}: skipped, tools/car needs a tty ==")
             continue
         try:
             s()

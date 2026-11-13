@@ -1209,7 +1209,7 @@ static void sequence_numbers_are_matched(void)
     m.ProtocolID = ISO15765; m.DataSize = 6; m.Data[2] = 0x07; m.Data[3] = 0xE0; m.Data[4] = 0x3E;
     CHECK_EQ(PassThruWriteMsgs(ch, &m, &n, 0), STATUS_NOERROR, "WriteMsgs with Timeout 0 returns at once");
     CHECK_EQ(n, 1, "and reports the message as queued");
-    CHECK(tx_contains("att6 6 0 1000000 "), "the transmit went out numbered, with the 1 s budget a zero timeout maps to");
+    CHECK(tx_contains("att6 6 0 1000000\r\n"), "the transmit went out unnumbered, with the 1 s budget a zero timeout maps to");
     mock_clear_tx();
     n = 1;
     CHECK_EQ(PassThruWriteMsgs(ch, &m, &n, 0xFFFFFFFFUL), ERR_TIMEOUT,
@@ -1241,6 +1241,16 @@ static void calls_are_recorded(void)
         SCONFIG c[2] = { { ISO15765_BS, 0 }, { ISO15765_STMIN, 5 } };
         SCONFIG_LIST l = { 2, c };
         PassThruIoctl(ch, SET_CONFIG, &l, NULL);
+    }
+    {
+        /* Read while the library still holds the file: a line is on disk as
+         * soon as its call has been made, for a crash to leave behind. */
+        int on_disk = 0;
+        f = fopen(path, "r");
+        while (f && fgets(line, sizeof line, f))
+            if (!strcmp(line, "ioctl 6 2 30=0 31=5\n")) on_disk = 1;
+        if (f) fclose(f);
+        CHECK(on_disk, "an ioctl is on disk before the next call");
     }
     memset(&m, 0, sizeof m);
     m.ProtocolID = ISO15765; m.TxFlags = ISO15765_FRAME_PAD; m.DataSize = 6;
@@ -1740,18 +1750,18 @@ static void timeout_zero_bus_budget(void)
     m.ProtocolID = CAN; m.DataSize = 8;
     mock_clear_tx();
     CHECK_EQ(PassThruWriteMsgs(can, &m, &n, 0), STATUS_NOERROR, "CAN write, Timeout 0");
-    CHECK(tx_contains("att5 8 0 50000 "), "50 ms budget for raw CAN");
+    CHECK(tx_contains("att5 8 0 50000\r\n"), "50 ms budget for raw CAN");
     m.ProtocolID = ISO15765; m.DataSize = 6; n = 1;
     mock_clear_tx();
     CHECK_EQ(PassThruWriteMsgs(iso, &m, &n, 0), STATUS_NOERROR, "ISO15765 write, Timeout 0");
-    CHECK(tx_contains("att6 6 0 1000000 "), "1 s budget for ISO 15765");
+    CHECK(tx_contains("att6 6 0 1000000\r\n"), "1 s budget for ISO 15765");
     {
         J_U32 jack = 0;
         CHECK_EQ(PassThruConnect(dev, ISO9141_CH3, 0, 9600, &jack), STATUS_NOERROR, "the jack");
         m.ProtocolID = ISO9141_CH3; m.DataSize = 3; n = 1;
         mock_clear_tx();
         CHECK_EQ(PassThruWriteMsgs(jack, &m, &n, 0), STATUS_NOERROR, "jack write, Timeout 0");
-        CHECK(tx_contains("att9 3 0 0 "), "no budget on the jack, as the vendor sends");
+        CHECK(tx_contains("att9 3 0 0\r\n"), "no budget on the jack, as the vendor sends");
     }
     shut(dev);
 }

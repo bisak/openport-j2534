@@ -143,10 +143,11 @@ op_status op_device_cmd(op_device *d, const char *line, size_t line_len,
                         unsigned timeout_ms, op_reply *reply);
 
 /*
- * Send a command and do not wait for its reply. The line is numbered like any
- * other, so the reply, whenever it arrives, is recognised as belonging to this
- * command and dropped rather than mistaken for the answer to a later one.
- * This is what J2534 asks for from PassThruWriteMsgs with Timeout 0.
+ * Send a command and do not wait for its reply. The line goes out unnumbered,
+ * as Tactrix's DLL sends it; the cable then answers nothing, and an answer
+ * that did come would carry no number and be dropped, since every waiting
+ * command has one. This is what J2534 asks for from PassThruWriteMsgs with
+ * Timeout 0.
  */
 op_status op_device_send_nowait(op_device *d, const char *line, size_t line_len,
                                 const uint8_t *payload, size_t payload_len);
