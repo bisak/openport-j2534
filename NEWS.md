@@ -4,16 +4,19 @@
 
 New
 
-- Windows: `openport-j2534-32.dll` and `openport-j2534-64.dll`, built with MinGW-w64 and needing no other file. A published release carries both, ready to use, in `openport-j2534-<version>-windows.zip`. The functions are `__stdcall` under their plain names, with the ordinals Tactrix's DLL gives them. `regsvr32` lists the DLL for J2534 applications with the same protocol entries Tactrix's installer writes, and `regsvr32 /u` removes it again, with the shared `PassThruSupport.04.04` key when nothing else is left in it. The cable is opened through Tactrix's USB driver when that is installed (the driver tested with this release), or through Windows' own USB serial driver as a COM port; `op_probe.exe` shows which. Measured against Tactrix's DLL on the same PC and bus (docs/TESTING.md): the same results but for the return codes already listed; ECU round trips the same, 800 ECU reads in 4.44 s against 4.62 s at less CPU; 488 configuration commands in 1.04 s against 1.19–1.31 s, at more CPU; a transmit with a timeout returns in 1.34 ms against 1.13 ms; and no frame lost with the program frozen 300 ms of every 500, where Tactrix's DLL lost about 2,500 in 30 s. 256 reads are kept waiting on the cable, where Tactrix's DLL keeps one. A `Timeout=0` write from a thread that exits at once is delivered whole: Windows cancels a thread's pending I/O when it exits, so a write returns only once the cable has the command.
-- CI on Linux, macOS and Windows: on Windows the unit tests, the simulator over a named pipe, and `regsvr32` with the DLL loaded from the registry as an application loads it, 32-bit and 64-bit. A release's Windows zip is made from the DLLs CI built and tested on the release's commit.
-- The simulator runs on Windows, over a named pipe.
+- Windows support: `openport-j2534-32.dll` and `openport-j2534-64.dll`, built with MinGW-w64. Each DLL is a single file. A release attaches both in `openport-j2534-<version>-windows.zip`.
+- The DLLs export the 14 `__stdcall` functions under their plain names, with the ordinals Tactrix's DLL uses.
+- `regsvr32` registers a DLL with the protocol entries Tactrix's installer writes. `regsvr32 /u` removes it, and removes the shared `PassThruSupport.04.04` key when nothing else is left in it.
+- The DLL opens the cable through Tactrix's USB driver, which is the one tested with this release, or else through the USB serial driver Windows gives the cable. `op_probe.exe` shows which.
+- Against Tactrix's DLL on the same PC and bus, the DLL returns the same results except for the documented return codes, and gives the same ECU round trips. It keeps 256 USB reads posted, so it lost no frame with the program frozen 300 ms of every 500, where Tactrix's DLL lost about 2,500 in 30 s. [docs/TESTING.md](docs/TESTING.md) has the measurements.
+- CI builds and tests on Linux, macOS, and Windows. On Windows it runs the unit tests, the simulator over a named pipe, and `regsvr32`, for both widths. A release's Windows zip is built from the DLLs that CI tested on the release's commit.
 
 Fixes
 
-- A command the cable has started taking is finished: the rest gets up to 2 s past the caller's timeout. A long ISO 15765 transmit that the cable held back (it takes the payload only as fast as it can send it) was cut off at the caller's timeout, and the cable then read the next command as the rest of the payload. Seen on Windows. On macOS the same transmit returned `ERR_DEVICE_NOT_CONNECTED` with the cable still attached; it now returns `ERR_TIMEOUT`, as Tactrix's DLL does.
-- The log (`OPENPORT_LOG`) and the call recording (`OPENPORT_RECORD`) are flushed after every line, on every platform. Windows' C library has no line buffering.
-- A `PassThruWriteMsgs` with a `Timeout` of 0 sends its transmits unnumbered, as Tactrix's DLL does. Numbered, the cable answered each one, and 50 frames took 0.4 ms a frame longer to hand over than through Tactrix's DLL; now the same.
-- On Linux, a serial device that another process also held open (a pty behind a tap or a simulator) stayed marked exclusive after `PassThruClose`, and the next `PassThruOpen` returned `ERR_DEVICE_IN_USE`. Close now gives the mark back.
+- A command that the cable has started to take is sent in full, with up to 2 s past the caller's timeout. Before, a long ISO 15765 transmit could be cut off at the timeout, and the cable then read the next command as the rest of its payload. On macOS that transmit returned `ERR_DEVICE_NOT_CONNECTED` with the cable still attached. It now returns `ERR_TIMEOUT`, as Tactrix's DLL does.
+- `PassThruWriteMsgs` with a `Timeout` of 0 sends its transmits unnumbered, as Tactrix's DLL does. Numbered, the cable answered each one, which cost 0.4 ms per frame.
+- The log (`OPENPORT_LOG`) and the call recording (`OPENPORT_RECORD`) are flushed after every line, on every platform.
+- On Linux, `PassThruClose` now releases the exclusive lock on a serial device that another process also holds open, such as a simulator's pty. Before, the next `PassThruOpen` returned `ERR_DEVICE_IN_USE`.
 
 ## 0.4.2 (2026-10-23)
 
