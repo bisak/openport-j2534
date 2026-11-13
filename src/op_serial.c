@@ -26,6 +26,7 @@
 #endif
 #include "op_transport.h"
 #include "op_log.h"
+#include "op_time.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -86,6 +87,7 @@ static op_status ser_write(op_transport *t, const uint8_t *buf, size_t len,
 {
     op_serial *s;
     size_t sent = 0;
+    unsigned long long deadline;
 
     if (t == NULL || t->impl == NULL || (buf == NULL && len > 0))
         return OP_ERR_PARAM;
@@ -94,11 +96,13 @@ static op_status ser_write(op_transport *t, const uint8_t *buf, size_t len,
 
     op_log_bytes("TX", buf, len);
 
+    deadline = op_mono_ms() + timeout_ms;
     while (sent < len) {
         ssize_t n;
-        op_status st = wait_ready(s->fd, POLLOUT, timeout_ms);
-        /* Part of the command is out: the rest must follow (OP_WRITE_GRACE_MS). */
-        if (st == OP_ERR_TIMEOUT && sent > 0) st = wait_ready(s->fd, POLLOUT, OP_WRITE_GRACE_MS);
+        /* Once part of the command is out, the rest has OP_WRITE_GRACE_MS
+         * more, once. */
+        op_status st = wait_ready(s->fd, POLLOUT,
+                                  op_ms_left(deadline + (sent > 0 ? OP_WRITE_GRACE_MS : 0u)));
         if (st == OP_ERR_TIMEOUT) {
             if (sent > 0) op_logf("serial write: the cable took %zu of %zu bytes", sent, len);
             return OP_ERR_STALLED;

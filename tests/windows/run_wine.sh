@@ -77,11 +77,13 @@ side() { # side <name> <command...>
   python3 "$ab/ptytap.py" "$dev" --log "$out/$name.tap" --pty-file "$out/.tap" & TAP=$!
   for _ in $(seq 1 50); do [[ -s $out/.tap ]] && break; sleep 0.1; done
   ln -sfn "$(cat "$out/.tap")" "$port"
-  "$@" 2> "$out/$name.err"
-  echo "$name run exit=$?"
+  local rc=0
+  "$@" 2> "$out/$name.err" || rc=$?
+  echo "$name run exit=$rc"
   kill "$TAP" 2>/dev/null; wait "$TAP" 2>/dev/null; TAP=""
   [[ -n ${SIM:-} ]] && { kill "$SIM" 2>/dev/null; wait "$SIM" 2>/dev/null; SIM=""; }
-  [[ -s $out/$name.jsonl ]] || die "$name produced no trace; see $out/$name.err"
+  [[ $rc -eq 0 ]] || die "$name exited with $rc; see $out/$name.err"
+  grep -q '"end":true' "$out/$name.jsonl" 2>/dev/null || die "$name's trace is incomplete; see $out/$name.err"
 }
 
 echo "== windows: $dll"
@@ -94,8 +96,19 @@ OPENPORT_DEVICE="$port" side native "$out/j2534_trace" "$native" "$out/native.js
 python3 "$ab/ab_diff.py" "$out/windows.jsonl" "$out/native.jsonl" --tap "$out/windows.tap" "$out/native.tap" --md "$out/report.md"
 echo; echo "artifacts in $out (in report.md, \"vendor\" is the Windows DLL and \"ours\" the native library)"
 
-# The report is for reading; the verdict is every step's result the same on
-# both sides and the same commands on the wire.
+# The report is for reading; the verdict is every call, in order, returning
+# the same on both sides, no output differing, and the same commands on the
+# wire.
+python3 - "$out/windows.jsonl" "$out/native.jsonl" <<'CALLS' || exit 1
+import json, sys
+def calls(path):
+    return [(j["scenario"], j["step"], j["rc"]) for j in map(json.loads, open(path)) if "step" in j]
+a, b = calls(sys.argv[1]), calls(sys.argv[2])
+bad = [(x, y) for x, y in zip(a, b) if x != y]
+for x, y in bad[:20]: print("DIFFERS:", x, "against", y)
+if len(a) != len(b): print("call counts differ: %d against %d" % (len(a), len(b)))
+sys.exit(1 if bad or len(a) != len(b) else 0)
+CALLS
 python3 - "$out/report.md" <<'PY'
 import sys
 rows = bad = 0; wire = False; section = ""

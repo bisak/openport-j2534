@@ -3,11 +3,13 @@
 # then run on a real Windows machine: the unit tests, the simulator over a
 # named pipe (the same handle path as Tactrix's USB driver), and regsvr32
 # with the DLL loaded from the registry as a J2534 application loads it.
+# Actions are pinned to a commit; the comment names its release.
 # SPDX-License-Identifier: GPL-3.0-or-later
 name: ci
 on:
   push:
   pull_request:
+  workflow_call:       # release.yml runs it on the release's commit first
 permissions:
   contents: read
 
@@ -15,7 +17,9 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev
       - run: make CFLAGS="-O2 -g -Werror"
       - run: make test
@@ -23,9 +27,11 @@ jobs:
       - run: make sim
 
   macos:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - run: brew install libusb
       - run: make CFLAGS="-O2 -g -Werror"
       - run: make check-all
@@ -33,13 +39,15 @@ jobs:
   windows-build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - run: sudo apt-get update && sudo apt-get install -y mingw-w64
       - name: 32-bit
         run: make CC=i686-w64-mingw32-gcc CFLAGS="-O2 -g -Werror" all smoke kline iso15765 build/win32/run_tests.exe
       - name: 64-bit
         run: make CC=x86_64-w64-mingw32-gcc CFLAGS="-O2 -g -Werror" all smoke kline iso15765 build/win64/run_tests.exe
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-dlls
           path: |
@@ -61,12 +69,14 @@ jobs:
     env:
       OPENPORT_LIB: ${{ github.workspace }}\build\win${{ matrix.bits }}\openport-j2534-${{ matrix.bits }}.dll
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows-dlls
           path: build
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
           architecture: ${{ matrix.python }}
